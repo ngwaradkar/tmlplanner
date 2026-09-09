@@ -180,7 +180,9 @@ st.markdown(f"""
         color: var(--text-primary) !important;
     }}
     
-    /* Sidebar - distinct dark-navy color so it stands out from the main panel */
+    /* Sidebar - distinct dark-navy color so it stands out from the main panel.
+       Uses explicit hex colors throughout (not theme variables) so nothing
+       here depends on how the rest of the app's theme system resolves. */
     [data-testid="stSidebar"] {{
         background-color: #111827 !important;
         border-right: 1px solid #1F2937 !important;
@@ -191,16 +193,53 @@ st.markdown(f"""
     [data-testid="stSidebar"] hr {{
         border-color: #374151 !important;
     }}
-    /* Buttons keep their own readable text color regardless of nesting --
-       without this, the broad sidebar text-color rule above could win
-       on a button's inner label element and turn it white-on-white. */
+    /* Nav buttons get their own fully explicit style -- a lighter "card"
+       tone than the sidebar background, with wrapping allowed and enough
+       height for two lines so a longer label is never clipped/invisible. */
+    [data-testid="stSidebar"] button[kind="secondary"] {{
+        background-color: #1F2937 !important;
+        border: 1px solid #374151 !important;
+        height: auto !important;
+        min-height: 2.6rem !important;
+        white-space: normal !important;
+        line-height: 1.3 !important;
+    }}
     [data-testid="stSidebar"] button[kind="secondary"],
     [data-testid="stSidebar"] button[kind="secondary"] * {{
-        color: var(--text-primary) !important;
+        color: #F3F4F6 !important;
+    }}
+    [data-testid="stSidebar"] button[kind="secondary"]:hover {{
+        background-color: #374151 !important;
+        border-color: #4B5563 !important;
+    }}
+    [data-testid="stSidebar"] button[kind="primary"] {{
+        background-color: #1D4ED8 !important;
+        height: auto !important;
+        min-height: 2.6rem !important;
+        white-space: normal !important;
+        line-height: 1.3 !important;
     }}
     [data-testid="stSidebar"] button[kind="primary"],
     [data-testid="stSidebar"] button[kind="primary"] * {{
         color: white !important;
+    }}
+    /* The sidebar's Quick Navigation now drives which section is shown, so
+       the main tab header row (the pill/label strip at the top of the main
+       panel) is redundant -- hide it. Scoped to .st-key-active_tcf_tab (the
+       CSS class Streamlit generates specifically because tcf_tabs uses
+       key="active_tcf_tab") so this ONLY affects that one tabs widget --
+       every other st.tabs() in the app (Control Panel's Auto-Sync/Manual
+       Upload tabs, the FIFO/Total Float sub-tabs, the Report sub-tabs) is
+       untouched since none of those have this key. The tab content itself
+       keeps working exactly as before; only the clickable header row is
+       hidden. [role="tablist"] is the primary, implementation-independent
+       selector; the other two are extra safety nets in case this Streamlit
+       version's tab header doesn't carry that role.
+    */
+    .st-key-active_tcf_tab [role="tablist"],
+    .st-key-active_tcf_tab [data-baseweb="tab-list"],
+    .st-key-active_tcf_tab [data-testid="stTabsList"] {{
+        display: none !important;
     }}
     .stApp [data-testid="stHeader"] {{
         background-color: transparent !important;
@@ -2361,7 +2400,7 @@ _tcf_tab_labels = [
 ]
 _tcf_tab_nav_short = [
     "📈 Summary Report",
-    "🧩 Cockpit WH & Front Wiring Shortage Report",
+    "🧩 Cockpit & Wiring Shortage",
     "🏭 TCF 1 Line",
     "🏭 TCF 2 Line",
     "🔍 Total Float Details",
