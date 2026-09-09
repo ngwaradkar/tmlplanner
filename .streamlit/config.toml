@@ -1,3 +1,10 @@
+[runner]
+# app.py contains zero bare-expression "magic" statements (verified via AST
+# scan), so this is a free win: it skips re-parsing/AST-transforming the
+# entire ~5,700-line script on every rerun, which showed up as a real,
+# measurable cost when profiling a full run of the app.
+magicEnabled = false
+
 [theme]
 base = "light"
 primaryColor = "#1D4ED8"
