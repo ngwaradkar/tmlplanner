@@ -95,27 +95,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ----------------- SIDEBAR: Branding & Theme -----------------
+# ----------------- SIDEBAR: Branding -----------------
 # (Quick Navigation + Status are added further down, once the report data
 # that they depend on -- active_clearance_shortage_alerts, tcf_tabs -- exists.)
 st.sidebar.markdown("### 🚗 TCF Dashboard")
 st.sidebar.caption("TCF1 & TCF2 VIN Generation PPC Dashboard")
 
-theme_option = st.sidebar.selectbox(
-    "🎨 Interface Theme",
-    options=["☀️ White Theme", "🌙 Dark Theme"],
-    index=0 if st.session_state.theme == '☀️ White Theme' else 1,
-    key="theme_selection_key"
-)
-if theme_option != st.session_state.theme:
-    st.session_state.theme = theme_option
-    try:
-        dl.save_metadata('theme', theme_option)
-    except Exception:
-        pass
-    st.rerun()
-
-is_dark = st.session_state.theme == "🌙 Dark Theme"
+# Theme toggle removed per request -- White Theme only, everywhere in the app.
+st.session_state.theme = "☀️ White Theme"
+is_dark = False
 
 # Title card now spans the full width (theme selector moved to the sidebar above)
 col_title_card = st.container()
@@ -192,16 +180,27 @@ st.markdown(f"""
         color: var(--text-primary) !important;
     }}
     
-    /* Sidebar - styled to match the selected theme (was force-hidden before) */
+    /* Sidebar - distinct dark-navy color so it stands out from the main panel */
     [data-testid="stSidebar"] {{
-        background-color: var(--bg-secondary) !important;
-        border-right: 1px solid var(--border-color) !important;
+        background-color: #111827 !important;
+        border-right: 1px solid #1F2937 !important;
     }}
     [data-testid="stSidebar"] * {{
-        color: var(--text-primary) !important;
+        color: #F9FAFB !important;
     }}
     [data-testid="stSidebar"] hr {{
-        border-color: var(--border-color) !important;
+        border-color: #374151 !important;
+    }}
+    /* Buttons keep their own readable text color regardless of nesting --
+       without this, the broad sidebar text-color rule above could win
+       on a button's inner label element and turn it white-on-white. */
+    [data-testid="stSidebar"] button[kind="secondary"],
+    [data-testid="stSidebar"] button[kind="secondary"] * {{
+        color: var(--text-primary) !important;
+    }}
+    [data-testid="stSidebar"] button[kind="primary"],
+    [data-testid="stSidebar"] button[kind="primary"] * {{
+        color: white !important;
     }}
     .stApp [data-testid="stHeader"] {{
         background-color: transparent !important;
@@ -1056,9 +1055,22 @@ default_bom_path = detected_files.get('BOM')
 default_float_path = detected_files.get('FLOAT_REPORT') or detected_files.get('FLOAT_PAINT_SUMMARY')
 default_core_available = (db_bom_exists or default_bom_path is not None) and default_float_path is not None
 
+# Anchor + one-shot scroll for the sidebar's "Control Panel" Quick Navigation
+# button (added below, near tcf_tabs). Control Panel lives outside the tabs,
+# so it can't use the tab key/on_change mechanism -- a plain same-page anchor
+# scroll is the reliable way to jump to it instead.
+st.markdown('<div id="control-panel-section"></div>', unsafe_allow_html=True)
+if st.session_state.get('_jump_to_control_panel'):
+    st.iframe(
+        "<script>window.parent.document.getElementById('control-panel-section')"
+        ".scrollIntoView({behavior: 'smooth', block: 'start'});</script>",
+        height=1
+    )
+    st.session_state['_jump_to_control_panel'] = False
+
 config_expander = st.expander(
     "⚙️ Control Panel: File Uploads & Engine Starting Stocks (Click to Expand/Collapse)",
-    expanded=not default_core_available and not st.session_state.get('run_report', False)
+    expanded=(not default_core_available and not st.session_state.get('run_report', False)) or st.session_state.get('_control_panel_force_open', False)
 )
 
 with config_expander:
@@ -2340,7 +2352,7 @@ if active_clearance_shortage_alerts:
 # st.tabs(key=...) tracks in st.session_state -- no risk of the two drifting apart.
 _tcf_tab_labels = [
     "📈 Summary Report & Excel Download",
-    "🧩 Cockpit WH & Wiring Shortage Reports",
+    "🧩 Cockpit WH & Front Wiring Shortage Report",
     "🏭 TCF 1 Line (Altroz/Punch/Nova)",
     "🏭 TCF 2 Line (Harrier/Safari)",
     "🔍 Total Float Details & Search",
@@ -2349,7 +2361,7 @@ _tcf_tab_labels = [
 ]
 _tcf_tab_nav_short = [
     "📈 Summary Report",
-    "🧩 Shortage Reports",
+    "🧩 Cockpit WH & Front Wiring Shortage Report",
     "🏭 TCF 1 Line",
     "🏭 TCF 2 Line",
     "🔍 Total Float Details",
@@ -2360,9 +2372,26 @@ _tcf_tab_nav_short = [
 def _sidebar_go_to_tab(label):
     st.session_state["active_tcf_tab"] = label
 
+def _sidebar_go_to_control_panel():
+    st.session_state['_jump_to_control_panel'] = True
+    st.session_state['_control_panel_force_open'] = True
+
 # ----------------- SIDEBAR: Quick Navigation -----------------
 st.sidebar.markdown("---")
 st.sidebar.markdown("#### 🧭 Quick Navigation")
+
+# Control Panel lives outside the tabs (it's the file-upload/stock-entry
+# section at the top of the main body), so it's a separate button from
+# Summary Report -- a plain anchor-scroll rather than the tab key/on_change
+# mechanism the other buttons below use.
+st.sidebar.button(
+    "⚙️ Control Panel",
+    width="stretch",
+    type="secondary",
+    key="nav_btn_control_panel",
+    on_click=_sidebar_go_to_control_panel
+)
+
 _current_tab = st.session_state.get("active_tcf_tab", _tcf_tab_labels[0])
 for _full_label, _short_label in zip(_tcf_tab_labels, _tcf_tab_nav_short):
     st.sidebar.button(
@@ -5558,7 +5587,7 @@ with tcf_tabs[0]:
 
 # ----------------- TAB 2: COCKPIT & WIRING SHORTAGE REPORTS -----------------
 with tcf_tabs[1]:
-    st.markdown("### 🧩 Cockpit WH & Wiring Shortage Reports")
+    st.markdown("### 🧩 Cockpit WH & Front Wiring Shortage Report")
     st.markdown("""
         Real-time shortage monitoring for **Cockpit WH Assemblies** and **Front Wiring Harnesses** matching engine summary models across TCF1 and TCF2 lines.
     """)
