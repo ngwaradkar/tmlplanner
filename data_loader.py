@@ -7,6 +7,7 @@ import openpyxl
 import pyxlsb
 import sqlite3
 import streamlit as st
+import requests
 
 def _hash_upload_buffer(b):
     """
@@ -687,6 +688,8 @@ def classify_files(uploaded_files):
                 classifications['TCF2_WIRING_STOCK'] = f
             else:
                 classifications['TCF1_WIRING_STOCK'] = f
+        elif 'hourly' in name:
+            classifications['HOURLY_PRODUCTION'] = f
                 
     return classifications
 
@@ -730,7 +733,7 @@ def detect_and_classify_files(directory_path):
         
     for name, path in file_entries:
         ext = os.path.splitext(name.lower())[1]
-        if ext not in ['.xlsx', '.xls', '.xlsb', '.csv']:
+        if ext not in ['.xlsx', '.xls', '.xlsb', '.csv', '.xlsm']:
             continue
             
         name_lower = name.lower()
@@ -787,6 +790,26 @@ def detect_and_classify_files(directory_path):
                 set_cat('TCF2_WIRING_STOCK', path)
             else:
                 set_cat('TCF1_WIRING_STOCK', path)
+        elif 'hourly' in name_lower:
+            set_cat('HOURLY_PRODUCTION', path)
+        elif 'dashboard files' in name_lower:
+            if 'HOURLY_PRODUCTION' not in classifications:
+                set_cat('HOURLY_PRODUCTION', path)
+
+    # If master Dashboard files.xlsm exists, unpack and prioritize its sheets for all 6 categories
+    for name, path in file_entries:
+        name_lower = name.lower()
+        if 'dashboard files' in name_lower and (name_lower.endswith('.xlsm') or name_lower.endswith('.xlsx')):
+            try:
+                with open(path, 'rb') as f_db:
+                    db_bytes = f_db.read()
+                db_buffers = parse_onedrive_workbook(db_bytes)
+                for cat_key, buf_val in db_buffers.items():
+                    if buf_val is not None:
+                        classifications[cat_key] = buf_val
+                break
+            except Exception:
+                pass
                 
     return classifications
 
@@ -1625,4 +1648,173 @@ def load_shop_wise_report(filepath_or_buffer, return_debug=False):
     except Exception as e:
         print(f"Error loading Shop_Wise_Report: {e}")
         return _fail(f"Unexpected error while parsing: {e}")
+
+def download_from_onedrive(url):
+    """
+    Downloads the Excel file from a OneDrive/SharePoint URL, or reads from a local path.
+    Returns the file content as bytes.
+    """
+    url = url.strip()
+    
+    # If it's a local file path
+    if not url.startswith('http'):
+        import os
+        if os.path.exists(url):
+            with open(url, 'rb') as f:
+                return f.read()
+        else:
+            raise FileNotFoundError(f"Local file not found: {url}")
+
+    # If it's a URL
+    if '?' in url:
+        download_url = f"{url}&download=1"
+    else:
+        download_url = f"{url}?download=1"
+        
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    
+    response = requests.get(download_url, headers=headers)
+    response.raise_for_status()
+    
+    # Check if we got an HTML login page instead of the Excel file
+    if 'html' in response.headers.get('Content-Type', '').lower():
+        raise ValueError(
+            "Received an HTML login page instead of the Excel file. "
+            "This happens if the SharePoint link has 'Block Download' enabled. "
+            "Please generate a link with 'Block Download' UNCHECKED, or enter the local path to the synced file (e.g. Dashboard files.xlsm)."
+        )
+        
+    return response.content
+
+def parse_onedrive_workbook(bytes_content):
+    """
+    Takes the raw bytes of the Dashboard files.xlsm, parses it, and returns 
+    a dictionary of BytesIO buffers for each of the 5 required reports.
+    """
+    excel_file = pd.ExcelFile(io.BytesIO(bytes_content), engine='openpyxl')
+    
+    # Mapping of system categories to their sheet names in the workbook
+    sheet_mapping = {
+        'FLOAT_REPORT': 'PPC_Float_BIW_VIN',
+        'FLOAT_PAINT_SUMMARY': 'PPC_Float_Paint',
+        'SHOP_WISE_REPORT': 'Date_Shop_Wise',
+        'TCF1_VGL': 'TCF1_VIN_Gen',
+        'TCF2_VGL': 'TCF2_VIN_Gen',
+        'HOURLY_PRODUCTION': 'Hourly_Production'
+    }
+    
+    buffers = {}
+    for key, sheet_name in sheet_mapping.items():
+        if sheet_name in excel_file.sheet_names:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name)
+            
+            buf = io.BytesIO()
+            buf.name = f"{sheet_name}.xlsx"
+            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+            buf.seek(0)
+            buffers[key] = buf
+        else:
+            buffers[key] = None
+            
+    return buffers
+
+def load_hourly_production(filepath_or_buffer):
+    """
+    Loads Hourly_Production report from Excel file, bytes buffer, or DataFrame.
+    Filters to only the 4 required achievement points:
+    - TCF1_VIN_GENERATION
+    - TCF2_VIN_GENERATION
+    - TCF1-DROP
+    - TCF2-DROP
+    Returns a cleaned DataFrame or None.
+    """
+    if filepath_or_buffer is None:
+        return None
+        
+    try:
+        if isinstance(filepath_or_buffer, pd.DataFrame):
+            df = filepath_or_buffer.copy()
+        elif hasattr(filepath_or_buffer, 'getvalue') or isinstance(filepath_or_buffer, (str, io.BytesIO)):
+            if hasattr(filepath_or_buffer, 'seek'):
+                filepath_or_buffer.seek(0)
+                
+            excel_file = pd.ExcelFile(filepath_or_buffer)
+            sheet_target = None
+            for s in excel_file.sheet_names:
+                if 'hourly' in s.lower() or 'production' in s.lower():
+                    sheet_target = s
+                    break
+            if not sheet_target:
+                sheet_target = excel_file.sheet_names[0]
+                
+            df = pd.read_excel(excel_file, sheet_name=sheet_target)
+        else:
+            return None
+            
+        if df.empty:
+            return None
+            
+        # Target achievement points to retain
+        target_keys = {
+            'TCF1_VIN_GENERATION': 'TCF1_VIN_GENERATION',
+            'TCF2_VIN_GENERATION': 'TCF2_VIN_GENERATION',
+            'TCF1-DROP': 'TCF1-DROP',
+            'TCF2-DROP': 'TCF2-DROP'
+        }
+        
+        def norm_key(val):
+            return re.sub(r'[^A-Z0-9]', '', str(val).upper())
+            
+        norm_map = {norm_key(k): k for k in target_keys}
+        
+        # Locate achievement point column
+        point_col = None
+        for c in df.columns:
+            c_upper = str(c).upper()
+            if any(term in c_upper for term in ['ACHIEVEMENT', 'POINT', 'STAGE', 'ACTIVITY']):
+                point_col = c
+                break
+        if not point_col:
+            if len(df.columns) > 1:
+                point_col = df.columns[1]
+            else:
+                point_col = df.columns[0]
+                
+        # Filter matching rows
+        matched_dict = {}
+        for _, row in df.iterrows():
+            raw_val = str(row[point_col]).strip()
+            n_val = norm_key(raw_val)
+            if n_val in norm_map:
+                std_key = norm_map[n_val]
+                row_copy = row.copy()
+                row_copy[point_col] = std_key
+                matched_dict[std_key] = row_copy
+                
+        if not matched_dict:
+            return None
+            
+        # Build ordered dataframe
+        ordered_rows = []
+        for k in ['TCF1_VIN_GENERATION', 'TCF2_VIN_GENERATION', 'TCF1-DROP', 'TCF2-DROP']:
+            if k in matched_dict:
+                ordered_rows.append(matched_dict[k])
+                
+        res_df = pd.DataFrame(ordered_rows)
+        
+        # Remove SR.NO column if present to keep table clean
+        cols_to_keep = [c for c in res_df.columns if not re.match(r'^(SR\.?\s*NO|S\.?\s*NO)$', str(c).strip(), re.I)]
+        res_df = res_df[cols_to_keep].reset_index(drop=True)
+        
+        # Standardize point col name
+        if point_col in res_df.columns and point_col != 'ACHIEVEMENT POINT':
+            res_df.rename(columns={point_col: 'ACHIEVEMENT POINT'}, inplace=True)
+            
+        return res_df
+    except Exception as e:
+        print(f"Error loading hourly production: {e}")
+        return None
 

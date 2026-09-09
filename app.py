@@ -5,13 +5,12 @@ import os
 import re
 import io
 import matplotlib.pyplot as plt
-import importlib
+import altair as alt
 import data_loader as dl
-importlib.reload(dl)
 import allocation_engine as ae
-importlib.reload(ae)
 import datetime
 from streamlit_paste_button import paste_image_button
+from streamlit_autorefresh import st_autorefresh
 
 # IST (India Standard Time) Timezone offset = UTC + 5:30
 IST_OFFSET = datetime.timedelta(hours=5, minutes=30)
@@ -45,6 +44,39 @@ def format_ist_mtime(filepath, fmt="%d-%m-%Y %I:%M %p"):
     except Exception:
         return None
 
+def perform_onedrive_sync(url):
+    try:
+        raw_bytes = dl.download_from_onedrive(url)
+        buffers = dl.parse_onedrive_workbook(raw_bytes)
+        upload_ts = format_ist_now("%d-%m-%Y %I:%M %p")
+        for category, buf in buffers.items():
+            if buf:
+                st.session_state[f"buffer_{category}"] = buf
+                st.session_state[f"upload_time_{category}"] = upload_ts
+                dl.save_metadata(f"upload_time_{category}", upload_ts)
+        st.session_state['last_onedrive_sync'] = datetime.datetime.now()
+        st.session_state['run_report'] = True
+        return True, "Synced successfully!"
+    except Exception as e:
+        return False, str(e)
+
+# OneDrive Auto-Sync Logic & Telegram 15-Minute Auto-Send Logic
+db_onedrive_url = dl.load_metadata('onedrive_url', '')
+db_auto_sync = str(dl.load_metadata('onedrive_auto_sync', 'True')).lower() == 'true'
+db_tg_auto_send = str(dl.load_metadata('telegram_auto_send_15m', 'False')).lower() == 'true'
+
+if db_tg_auto_send or st.session_state.get('telegram_auto_send_15m', False):
+    st_autorefresh(interval=60 * 1000, key="tg_auto_send_refresh")
+elif db_auto_sync:
+    st_autorefresh(interval=5 * 60 * 1000, key="onedrive_refresh")
+
+if db_auto_sync and db_onedrive_url:
+    last_sync = st.session_state.get('last_onedrive_sync')
+    # Fetch if not synced this session, or if more than 270 seconds (4.5 mins) have passed
+    if not last_sync or (datetime.datetime.now() - last_sync).total_seconds() > 270:
+        with st.spinner("🔄 Auto-syncing live data from OneDrive..."):
+            perform_onedrive_sync(db_onedrive_url)
+
 # Initialize session state for theme preference from database
 db_theme = '☀️ White Theme'
 try:
@@ -60,28 +92,33 @@ st.set_page_config(
     page_title="TCF1 & TCF2 VIN generation PPC Dashboard",
     page_icon="🚗",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-# Render theme selector at top right
-col_title_card, col_theme_select = st.columns([5.5, 1])
-with col_theme_select:
-    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-    theme_option = st.selectbox(
-        "🎨 Interface Theme",
-        options=["☀️ White Theme", "🌙 Dark Theme"],
-        index=0 if st.session_state.theme == '☀️ White Theme' else 1,
-        key="theme_selection_key"
-    )
-    if theme_option != st.session_state.theme:
-        st.session_state.theme = theme_option
-        try:
-            dl.save_metadata('theme', theme_option)
-        except Exception:
-            pass
-        st.rerun()
+# ----------------- SIDEBAR: Branding & Theme -----------------
+# (Quick Navigation + Status are added further down, once the report data
+# that they depend on -- active_clearance_shortage_alerts, tcf_tabs -- exists.)
+st.sidebar.markdown("### 🚗 TCF Dashboard")
+st.sidebar.caption("TCF1 & TCF2 VIN Generation PPC Dashboard")
+
+theme_option = st.sidebar.selectbox(
+    "🎨 Interface Theme",
+    options=["☀️ White Theme", "🌙 Dark Theme"],
+    index=0 if st.session_state.theme == '☀️ White Theme' else 1,
+    key="theme_selection_key"
+)
+if theme_option != st.session_state.theme:
+    st.session_state.theme = theme_option
+    try:
+        dl.save_metadata('theme', theme_option)
+    except Exception:
+        pass
+    st.rerun()
 
 is_dark = st.session_state.theme == "🌙 Dark Theme"
+
+# Title card now spans the full width (theme selector moved to the sidebar above)
+col_title_card = st.container()
 
 # Inject style blocks dynamically using CSS variables
 if is_dark:
@@ -155,16 +192,18 @@ st.markdown(f"""
         color: var(--text-primary) !important;
     }}
     
-    /* Completely hide sidebar and collapse button */
-    [data-testid="stSidebar"], section[data-testid="stSidebar"] {{
-        display: none !important;
-        width: 0px !important;
+    /* Sidebar - styled to match the selected theme (was force-hidden before) */
+    [data-testid="stSidebar"] {{
+        background-color: var(--bg-secondary) !important;
+        border-right: 1px solid var(--border-color) !important;
     }}
-    [data-testid="collapsedControl"] {{
-        display: none !important;
+    [data-testid="stSidebar"] * {{
+        color: var(--text-primary) !important;
+    }}
+    [data-testid="stSidebar"] hr {{
+        border-color: var(--border-color) !important;
     }}
     .stApp [data-testid="stHeader"] {{
-        left: 0px !important;
         background-color: transparent !important;
     }}
     .main .block-container {{
@@ -222,39 +261,113 @@ st.markdown(f"""
         overflow: visible !important;
     }}
     
-    /* Segmented control for tabs */
-    div[data-baseweb="tab-list"] {{
-        background-color: var(--bg-secondary) !important;
-        padding: 0.3rem !important;
-        border-radius: 12px !important;
-        gap: 6px !important;
-        margin-bottom: 2rem !important;
-        border: 1px solid var(--border-color) !important;
+    /* =======================================================
+       PREMIUM EXECUTIVE SEGMENTED NAVIGATION TAB BAR
+       ======================================================= */
+    div.stTabs {{
+        margin-top: 0.25rem !important;
+        margin-bottom: 1.0rem !important;
     }}
+    
+    div[data-baseweb="tab-list"] {{
+        background: linear-gradient(180deg, var(--bg-primary) 0%, var(--bg-secondary) 100%) !important;
+        padding: 5px 6px !important;
+        border-radius: 12px !important;
+        gap: 5px !important;
+        margin-bottom: 0.75rem !important;
+        border: 1px solid var(--border-color) !important;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03), inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+        display: flex !important;
+        align-items: center !important;
+        flex-wrap: wrap !important;
+        width: 100% !important;
+    }}
+
+    /* Compact nested tabs inside expanders and cards */
+    details[data-testid="stExpander"] div.stTabs,
+    div[data-testid="stVerticalBlockBorderWrapper"] div.stTabs,
+    div[data-testid="stForm"] div.stTabs {{
+        margin-top: 0px !important;
+        margin-bottom: 0.35rem !important;
+    }}
+    details[data-testid="stExpander"] div[data-baseweb="tab-list"],
+    div[data-testid="stVerticalBlockBorderWrapper"] div[data-baseweb="tab-list"],
+    div[data-testid="stForm"] div[data-baseweb="tab-list"] {{
+        margin-bottom: 0.4rem !important;
+        padding: 3px 5px !important;
+        gap: 4px !important;
+        border-radius: 8px !important;
+    }}
+    details[data-testid="stExpander"] button[data-baseweb="tab"],
+    div[data-testid="stVerticalBlockBorderWrapper"] button[data-baseweb="tab"],
+    div[data-testid="stForm"] button[data-baseweb="tab"] {{
+        padding: 4px 10px !important;
+        font-size: 0.82rem !important;
+        border-radius: 6px !important;
+    }}
+    
+    /* Remove default Streamlit tab borders and highlight bars */
+    div[data-baseweb="tab-border"],
+    div[data-baseweb="tab-highlight"],
+    div[data-testid="stTabHighlight"],
+    div[data-testid="stTabBorder"] {{
+        display: none !important;
+        opacity: 0 !important;
+        height: 0px !important;
+        border: none !important;
+    }}
+    
+    /* Base Tab Buttons */
     button[data-baseweb="tab"] {{
         background-color: transparent !important;
-        border: none !important;
-        border-radius: 8px !important;
-        padding: 0.6rem 1.4rem !important;
+        border: 1px solid transparent !important;
+        border-radius: 10px !important;
+        padding: 8px 16px !important;
+        margin: 0 !important;
         color: var(--text-secondary) !important;
         font-weight: 600 !important;
         font-size: 0.92rem !important;
-        transition: all 0.2s ease !important;
+        letter-spacing: -0.01em !important;
+        transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        cursor: pointer !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 6px !important;
     }}
+    
+    button[data-baseweb="tab"] * {{
+        color: inherit !important;
+        font-size: inherit !important;
+        font-weight: inherit !important;
+        line-height: 1.4 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }}
+    
+    /* Tab Hover State */
     button[data-baseweb="tab"]:hover {{
         color: var(--text-primary) !important;
-        background-color: var(--hover-tint) !important;
-    }}
-    button[data-baseweb="tab"][aria-selected="true"] {{
         background-color: var(--card-bg) !important;
-        color: var(--accent-color) !important;
-        border: 1px solid var(--border-color) !important;
-        border-bottom: 3px solid var(--accent-color) !important;
-        font-weight: 700 !important;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04) !important;
+        border-color: var(--border-color) !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 3px 8px rgba(0, 0, 0, 0.06) !important;
     }}
-    div[data-baseweb="tab-border"] {{
-        display: none !important;
+    
+    /* Active Selected Tab */
+    button[data-baseweb="tab"][aria-selected="true"],
+    div.stTabs button[aria-selected="true"] {{
+        background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%) !important;
+        color: #ffffff !important;
+        border: 1px solid #0284c7 !important;
+        font-weight: 750 !important;
+        box-shadow: 0 4px 14px rgba(2, 132, 199, 0.38), 0 1px 3px rgba(0, 0, 0, 0.1) !important;
+        transform: translateY(-1px) !important;
+    }}
+    
+    button[data-baseweb="tab"][aria-selected="true"] * {{
+        color: #ffffff !important;
+        font-weight: 750 !important;
     }}
     
     /* Expander styling */
@@ -374,11 +487,30 @@ st.markdown(f"""
         border-color: var(--border-color) !important;
     }}
     
-    /* Custom file uploader border */
+    /* Custom file uploader compact look */
     section[data-testid="stFileUploader"] {{
-        border: 2px dashed var(--border-color) !important;
-        border-radius: 12px !important;
+        border: 1.5px dashed var(--border-color) !important;
+        border-radius: 10px !important;
         background-color: var(--bg-secondary) !important;
+        padding: 0.4rem 0.6rem !important;
+        min-height: 0px !important;
+    }}
+    section[data-testid="stFileUploader"] > div {{
+        padding: 0.2rem 0 !important;
+    }}
+    section[data-testid="stFileUploader"] small {{
+        font-size: 0.72rem !important;
+    }}
+    section[data-testid="stFileUploader"] button {{
+        padding: 0.35rem 0.8rem !important;
+        font-size: 0.82rem !important;
+    }}
+
+    /* Streamlit bordered containers compact padding */
+    div[data-testid="stVerticalBlockBorderWrapper"] {{
+        padding: 0.75rem 0.9rem !important;
+        border-radius: 12px !important;
+        margin-bottom: 0.35rem !important;
     }}
 
     /* Status pulse animation for the header "live" indicator */
@@ -452,7 +584,7 @@ st.markdown(f"""
         font-weight: 600 !important;
     }}
 
-    /* Responsive tweaks for tablet / mobile */
+    /* ===== RESPONSIVE TWEAKS: TABLET ===== */
     @media (max-width: 900px) {{
         .main .block-container {{
             padding: 1.25rem 1rem !important;
@@ -462,6 +594,137 @@ st.markdown(f"""
         }}
         h1 {{ font-size: 1.6rem !important; }}
         h2 {{ font-size: 1.35rem !important; }}
+    }}
+
+    /* ===== RESPONSIVE TWEAKS: MOBILE (≤ 640px) ===== */
+    @media (max-width: 640px) {{
+        /* Tighten main container padding */
+        .main .block-container {{
+            padding: 0.75rem 0.5rem !important;
+        }}
+
+        /* Shrink headings for mobile */
+        h1 {{ font-size: 1.25rem !important; }}
+        h2 {{ font-size: 1.1rem !important; }}
+        h3 {{ font-size: 1rem !important; }}
+        h4 {{ font-size: 0.92rem !important; }}
+
+        /* Compact metric cards */
+        div[data-testid="stMetric"] {{
+            padding: 0.6rem 0.75rem !important;
+            border-radius: 10px !important;
+        }}
+        div[data-testid="stMetric"] label {{
+            font-size: 0.72rem !important;
+        }}
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] {{
+            font-size: 0.95rem !important;
+        }}
+
+        /* Scrollable, compact tab bar */
+        div[data-baseweb="tab-list"] {{
+            flex-wrap: nowrap !important;
+            overflow-x: auto !important;
+            -webkit-overflow-scrolling: touch !important;
+            gap: 4px !important;
+            padding: 4px 4px !important;
+            border-radius: 10px !important;
+            margin-bottom: 1rem !important;
+        }}
+        button[data-baseweb="tab"] {{
+            padding: 6px 10px !important;
+            font-size: 0.78rem !important;
+            border-radius: 8px !important;
+            white-space: nowrap !important;
+            flex-shrink: 0 !important;
+        }}
+
+        /* Reduce column gaps — Streamlit renders columns side-by-side */
+        div[data-testid="stHorizontalBlock"] {{
+            gap: 0.35rem !important;
+        }}
+
+        /* Compact expander */
+        details[data-testid="stExpander"] {{
+            margin-bottom: 0.75rem !important;
+            border-radius: 10px !important;
+        }}
+        details[data-testid="stExpander"] summary {{
+            font-size: 0.85rem !important;
+        }}
+
+        /* Compact containers / forms */
+        div[data-testid="stForm"] {{
+            padding: 0.75rem !important;
+            border-radius: 10px !important;
+        }}
+
+        /* Reduce vertical spacing in bordered containers */
+        div[data-testid="stVerticalBlock"] > div {{
+            padding-top: 0 !important;
+        }}
+
+        /* Title card mobile class */
+        .mobile-title-card {{
+            padding: 1.1rem 1rem !important;
+            border-radius: 12px !important;
+        }}
+        .mobile-title-card h1 {{
+            font-size: 1.15rem !important;
+            line-height: 1.3 !important;
+        }}
+        .mobile-title-card p {{
+            font-size: 0.82rem !important;
+        }}
+
+        /* Status rows: stack label + icon on small screens */
+        .mobile-status-row {{
+            flex-direction: column !important;
+            align-items: flex-start !important;
+            gap: 2px !important;
+            margin-bottom: 6px !important;
+            padding: 6px 0 !important;
+            border-bottom: 1px solid var(--border-color) !important;
+        }}
+        .mobile-status-label {{
+            width: auto !important;
+            min-width: 0 !important;
+            font-size: 0.82rem !important;
+        }}
+        .mobile-status-badge {{
+            font-size: 0.78rem !important;
+        }}
+        .mobile-status-time {{
+            font-size: 0.7rem !important;
+            word-break: break-all !important;
+        }}
+
+        /* Buttons full-width and compact */
+        button[kind="primary"], button[kind="secondary"] {{
+            padding: 0.5rem 1rem !important;
+            font-size: 0.85rem !important;
+            border-radius: 8px !important;
+        }}
+
+        /* Download button */
+        div[data-testid="stDownloadButton"] button {{
+            font-size: 0.82rem !important;
+            padding: 0.4rem 0.8rem !important;
+        }}
+
+        /* File uploader compact */
+        section[data-testid="stFileUploader"] {{
+            border-radius: 10px !important;
+        }}
+
+        /* Number inputs compact */
+        div[data-baseweb="input"] input {{
+            font-size: 0.85rem !important;
+            padding: 0.4rem 0.5rem !important;
+        }}
+
+        /* Scrollbar thinner on mobile */
+        ::-webkit-scrollbar {{ width: 4px; height: 4px; }}
     }}
 </style>
 """, unsafe_allow_html=True)
@@ -474,15 +737,15 @@ with col_title_card:
     else:
         _status_text = "System Online"
     st.markdown(f"""
-    <div style="background: linear-gradient(135deg, var(--accent-color) 0%, #06B6D4 100%); padding: 1.8rem 2.2rem; border-radius: 16px; margin-bottom: 2rem; color: white; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);">
+    <div class="mobile-title-card" style="background: linear-gradient(135deg, var(--accent-color) 0%, #06B6D4 100%); padding: 1.8rem 2.2rem; border-radius: 16px; margin-bottom: 1.5rem; color: white; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);">
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
-            <div>
-                <h1 style="color: white !important; font-weight: 850; margin: 0; font-size: 2.2rem; letter-spacing: -0.03em; font-family: 'Inter', sans-serif;">TCF1 & TCF2 VIN Generation PPC Dashboard</h1>
-                <p style="color: rgba(255,255,255,0.9); margin: 0.5rem 0 0 0; font-size: 1.05rem; font-weight: 400; font-family: 'Inter', sans-serif;">Painted Body Storage (PBS) Buffer Allocation & Multi-Stage Material Availability Summary</p>
+            <div style="min-width: 0; flex: 1;">
+                <h1 style="color: white !important; font-weight: 850; margin: 0; font-size: 2.2rem; letter-spacing: -0.03em; font-family: 'Inter', sans-serif; overflow-wrap: break-word;">TCF1 & TCF2 VIN Generation PPC Dashboard</h1>
+                <p style="color: rgba(255,255,255,0.9); margin: 0.4rem 0 0 0; font-size: 1.0rem; font-weight: 400; font-family: 'Inter', sans-serif;">Painted Body Storage (PBS) Buffer Allocation & Multi-Stage Material Availability Summary</p>
             </div>
-            <div style="display: flex; align-items: center; gap: 0.45rem; background: rgba(255,255,255,0.16); padding: 0.4rem 0.9rem; border-radius: 999px; white-space: nowrap;">
+            <div style="display: flex; align-items: center; gap: 0.45rem; background: rgba(255,255,255,0.16); padding: 0.35rem 0.75rem; border-radius: 999px; white-space: nowrap; flex-shrink: 0;">
                 <span style="width: 8px; height: 8px; border-radius: 50%; background: #34D399; box-shadow: 0 0 0 3px rgba(52,211,153,0.35); display: inline-block; animation: statusPulse 2s ease-in-out infinite;"></span>
-                <span style="color: white; font-size: 0.82rem; font-weight: 600; font-family: 'Inter', sans-serif;">{_status_text}</span>
+                <span style="color: white; font-size: 0.8rem; font-weight: 600; font-family: 'Inter', sans-serif;">{_status_text}</span>
             </div>
         </div>
     </div>
@@ -592,6 +855,13 @@ if 'telegram_chat_id' not in st.session_state:
         st.session_state.telegram_chat_id = saved_cid if saved_cid else DEFAULT_TELEGRAM_CHAT_ID
     except Exception:
         st.session_state.telegram_chat_id = DEFAULT_TELEGRAM_CHAT_ID
+
+if 'telegram_auto_send_15m' not in st.session_state:
+    try:
+        saved_auto = dl.load_metadata('telegram_auto_send_15m', 'False') == 'True'
+        st.session_state.telegram_auto_send_15m = saved_auto
+    except Exception:
+        st.session_state.telegram_auto_send_15m = False
 
 # Auto reset at 6:30 AM is completely disabled. Data reset is only performed when manually triggered by planner via Control Center.
 
@@ -770,6 +1040,7 @@ all_categories = [
     'FLOAT_REPORT', 
     'FLOAT_PAINT_SUMMARY',
     'SHOP_WISE_REPORT',
+    'HOURLY_PRODUCTION',
     'TCF1_VGL', 'TCF2_VGL',
     'TCF1_ALTROZ_COCKPIT_STOCK', 'TCF1_NOVA_COCKPIT_STOCK', 'TCF2_COCKPIT_STOCK',
     'TCF1_WIRING_STOCK', 'TCF2_WIRING_STOCK'
@@ -791,17 +1062,47 @@ config_expander = st.expander(
 )
 
 with config_expander:
-    col_upload, col_engine = st.columns([1.15, 1.2])
-    
+    col_upload, col_engine, col_extras = st.columns([1.1, 1.1, 1.0])
+
     with col_upload:
         with st.container(border=True):
-            st.markdown("#### 📤 Upload Raw Plant Files")
+            st.markdown("<div style='font-weight:700; font-size:15px; margin-bottom:4px;'>📥 Data Sync & Upload</div>", unsafe_allow_html=True)
+            sync_tab, upload_tab = st.tabs(["🔄 Auto-Sync", "📤 Manual Upload"])
             
-            uploaded_files = st.file_uploader(
-                "Upload plant reports to replace existing ones",
-                accept_multiple_files=True,
-                help="Upload raw spreadsheets (Float, Wiring, Cockpit, or VGL). They will automatically replace older files on disk."
-            )
+            with sync_tab:
+                input_url = st.text_input("OneDrive / SharePoint URL", value=db_onedrive_url, placeholder="e.g. Dashboard files.xlsm or SharePoint link...", label_visibility="collapsed")
+                
+                col_sync_btn, col_auto_toggle = st.columns([1, 1])
+                with col_sync_btn:
+                    if st.button("🔄 Sync Now", use_container_width=True):
+                        if input_url:
+                            with st.spinner("Downloading and parsing OneDrive data..."):
+                                success, msg = perform_onedrive_sync(input_url)
+                                if success:
+                                    st.success(msg)
+                                    dl.save_metadata('onedrive_url', input_url)
+                                    st.rerun()
+                                else:
+                                    st.error(f"Sync failed: {msg}")
+                        else:
+                            st.warning("Please enter a URL first.")
+                            
+                with col_auto_toggle:
+                    st.markdown("<div style='height: 2px;'></div>", unsafe_allow_html=True)
+                    new_auto_sync = st.toggle("Enable 5-Min Auto-Sync", value=db_auto_sync)
+                    if new_auto_sync != db_auto_sync:
+                        dl.save_metadata('onedrive_auto_sync', str(new_auto_sync))
+                        st.rerun()
+                        
+                if input_url != db_onedrive_url and input_url:
+                    dl.save_metadata('onedrive_url', input_url)
+
+            with upload_tab:
+                uploaded_files = st.file_uploader(
+                    "Upload plant reports to replace existing ones",
+                    accept_multiple_files=True,
+                    help="Upload raw spreadsheets (Float, Wiring, Cockpit WH, or VGL). They will automatically replace older files on disk."
+                )
             
             # Process uploads immediately, saving to session state buffers and optionally to disk
             uploaded_ids = [f"{f.name}_{f.size}" for f in uploaded_files] if uploaded_files else []
@@ -840,7 +1141,7 @@ with config_expander:
                         # Try to save file to disk (succeeds locally, fails safely in read-only cloud)
                         try:
                             old_path = detected_files.get(category)
-                            if old_path and os.path.exists(old_path):
+                            if old_path and isinstance(old_path, (str, os.PathLike)) and os.path.exists(old_path):
                                 os.remove(old_path)
                             
                             new_path = os.path.join(active_dir, uploaded_file.name)
@@ -850,7 +1151,7 @@ with config_expander:
                         except Exception:
                             pass
                         
-                        st.toast(f"✅ Loaded {category.replace('_',' ')}: {uploaded_file.name}", icon="✅")
+                        st.toast(f"✅ Loaded {category.replace('_',' ').replace('COCKPIT', 'COCKPIT WH')}: {uploaded_file.name}", icon="✅")
                         replaced_any = True
                 
                 # Record that we processed these files
@@ -859,26 +1160,30 @@ with config_expander:
                     detected_files = dl.detect_and_classify_files(active_dir)
                     st.session_state.run_report = False
                     st.rerun()
-            
-            st.markdown("##### Loaded Files Status")
-            
-            # Check if database has BOM
-            db_bom_df = None
-            try:
-                db_bom_df = dl.load_bom_from_db()
-                if db_bom_df is not None and not db_bom_df.empty:
-                    import io
-                    excel_buffer = io.BytesIO()
-                    db_bom_df.to_excel(excel_buffer, index=False)
-                    st.download_button(
-                        label="⬇️ Download Updated BOM (.xlsx)",
-                        data=excel_buffer.getvalue(),
-                        file_name="Bom details.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        help="Download the database state (including Quick-Entry fixes) to permanently update your GitHub repo."
-                    )
-            except Exception:
-                pass
+
+        with st.container(border=True):
+            col_stat_title, col_stat_dl = st.columns([1.3, 1.0])
+            with col_stat_title:
+                st.markdown("<div style='font-weight:700; font-size:13.5px; margin-top:4px;'>📋 Loaded Files Status</div>", unsafe_allow_html=True)
+            with col_stat_dl:
+                # Check if database has BOM
+                db_bom_df = None
+                try:
+                    db_bom_df = dl.load_bom_from_db()
+                    if db_bom_df is not None and not db_bom_df.empty:
+                        import io
+                        excel_buffer = io.BytesIO()
+                        db_bom_df.to_excel(excel_buffer, index=False)
+                        st.download_button(
+                            label="⬇️ BOM (.xlsx)",
+                            data=excel_buffer.getvalue(),
+                            file_name="Bom details.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            help="Download the database state (including Quick-Entry fixes)",
+                            use_container_width=True
+                        )
+                except Exception:
+                    pass
             
             status_items = []
             seq_num = 1
@@ -886,7 +1191,8 @@ with config_expander:
             # Populate loaded_data
             for category in all_categories:
                 detected_path = detected_files.get(category)
-                is_default_exists = detected_path is not None and os.path.exists(detected_path)
+                is_buffer = isinstance(detected_path, (io.BytesIO, bytes))
+                is_default_exists = detected_path is not None and (is_buffer or (isinstance(detected_path, (str, os.PathLike)) and os.path.exists(detected_path)))
                 
                 # Check session state buffer first
                 in_mem_buffer = st.session_state.get(f"buffer_{category}")
@@ -900,9 +1206,11 @@ with config_expander:
                         loaded_data[category] = detected_path
                     continue
                     
-                display_name = category.replace('_',' ').replace('VGL', 'VIN Generation')
+                display_name = category.replace('_',' ').replace('VGL', 'VIN Generation').replace('COCKPIT', 'COCKPIT WH')
                 if category in ['TCF1_VGL', 'TCF2_VGL']:
                     display_name = f"DPT {display_name}"
+                elif category == 'HOURLY_PRODUCTION':
+                    display_name = "Hourly Production Report"
 
                 upload_time = st.session_state.get(f"upload_time_{category}")
                 if not upload_time:
@@ -912,7 +1220,10 @@ with config_expander:
                         upload_time = None
 
                 if not upload_time and is_default_exists:
-                    upload_time = format_ist_mtime(detected_path)
+                    if isinstance(detected_path, (str, os.PathLike)):
+                        upload_time = format_ist_mtime(detected_path)
+                    elif is_buffer:
+                        upload_time = format_ist_now("%d-%m-%Y %I:%M %p")
 
                 time_label = f"({upload_time})" if upload_time else "(No upload time)"
 
@@ -935,17 +1246,32 @@ with config_expander:
             sub_text_color = "#94A3B8" if is_dark_theme else "#64748B"
             label_color = "#FAFAFA" if is_dark_theme else "#1E293B"
 
-            status_html = "<div style='font-family: \"Inter\", sans-serif; font-size: 13px; line-height: 1.8; margin-top: 8px;'>"
+            status_html = "<div style='font-family: \"Inter\", sans-serif; margin-top: 2px;'>"
             for num, name, icon, src in status_items:
-                status_html += f'<div style="display: flex; align-items: center; margin-bottom: 4px;"><span style="font-weight: 700; width: 255px; color: {label_color}; display: inline-block; flex-shrink: 0;">{num}. {name}:</span><span style="margin-right: 12px; flex-shrink: 0;">{icon}</span><span style="color: {sub_text_color}; font-size: 12px; word-break: break-all;">{src}</span></div>'
+                # Determine badge color based on status
+                if "🟢" in icon:
+                    badge_bg = "#DCFCE7" if not is_dark_theme else "#064E3B"
+                    badge_text = "#166534" if not is_dark_theme else "#D1FAE5"
+                    badge_label = "✓ Uploaded"
+                else:
+                    badge_bg = "#FEE2E2" if not is_dark_theme else "#7F1D1D"
+                    badge_text = "#DC2626" if not is_dark_theme else "#FEE2E2"
+                    badge_label = "✗ Missing"
+                row_border = '#30363D' if is_dark_theme else '#F1F5F9'
+                status_html += f'''<div style="padding: 3.5px 0; border-bottom: 1px solid {row_border}; display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+                    <div style="display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0;">
+                        <span style="font-weight: 650; color: {label_color}; font-size: 12px; flex-shrink: 0;">{num}. {name}:</span>
+                        <span style="color: {sub_text_color}; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{src}</span>
+                    </div>
+                    <span style="background: {badge_bg}; color: {badge_text}; padding: 1.5px 7px; border-radius: 5px; font-size: 10.5px; font-weight: 600; white-space: nowrap; flex-shrink: 0;">{badge_label}</span>
+                </div>'''
             status_html += "</div>"
             st.markdown(status_html, unsafe_allow_html=True)
 
-        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+    with col_extras:
         with st.container(border=True):
             st.markdown("#### ⚡ Punch EV (Nova) Component Starting Stocks")
             st.markdown("<small style='color:#8896AB'>Enter clearance counts for 5 critical Punch EV materials (Defaults: 0)</small>", unsafe_allow_html=True)
-            
             nova_vals = {}
             if 'nova_materials_df' in st.session_state and st.session_state.nova_materials_df is not None:
                 for idx, r_nova in st.session_state.nova_materials_df.iterrows():
@@ -953,11 +1279,11 @@ with config_expander:
 
             materials_list = ["Battery", "Combo", "Tube Frame(Craddle)", "Subframe", "RTB"]
 
-            nova_cols = st.columns(5)
+            nova_cols = st.columns(3)
             new_nova_input_vals = {}
             for idx, mat in enumerate(materials_list):
                 current_val = nova_vals.get(mat, 0)
-                with nova_cols[idx]:
+                with nova_cols[idx % 3]:
                     st.markdown(f"<div style='font-weight: 700; font-size: 12px; color: {label_color}; margin-bottom: 3px; word-break: break-word;'>{mat}</div>", unsafe_allow_html=True)
                     new_nova_input_vals[mat] = st.number_input(
                         label=mat,
@@ -1073,34 +1399,34 @@ with config_expander:
                 ms_disp_df = st.session_state.model_shortages_df.copy()
                 
                 for idx_ms, row_ms in ms_disp_df.iterrows():
-                    c1, c2, c3, c4, c5, c6 = st.columns([1.1, 1.1, 1.4, 0.7, 1.5, 0.4])
-                    with c1:
-                        st.markdown(f"**{row_ms['Model']}**")
-                    with c2:
-                        st.markdown(f"`{row_ms.get('Trims', 'All Trims')}`")
-                    with c3:
-                        st.markdown(f"{row_ms['Part Name']}")
-                    with c4:
-                        st.markdown(f"Clearance: `{row_ms['Clearance Qty']}`")
-                    with c5:
-                        c_qty = int(row_ms['Clearance Qty'])
-                        tcf1_tmp = locals().get('tcf1_drops', None)
-                        tcf2_tmp = locals().get('tcf2_drops', None)
-                        vins_today = get_backflushed_vin_count_for_model_trims(row_ms['Model'], row_ms.get('Trims', 'All Trims'), tcf1_tmp, tcf2_tmp)
-                        true_buf = max(0, c_qty - vins_today)
-                        if true_buf <= 0:
-                            st.markdown(f"<span style='background:#FEE2E2; color:#DC2626; border: 1px solid #FCA5A5; padding:3px 8px; border-radius:6px; font-weight:700; font-size:11px;'>🚨 SHORTAGE: 0 Buffer (VIN Gen: {vins_today})</span>", unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"<span style='background:#DCFCE7; color:#166534; border: 1px solid #86EFAC; padding:3px 8px; border-radius:6px; font-weight:600; font-size:11px;'>🟢 OK: {true_buf} Buffer (VIN Gen: {vins_today})</span>", unsafe_allow_html=True)
-                    with c6:
-                        if st.button("🗑️", key=f"del_ms_{idx_ms}", help="Delete item"):
-                            st.session_state.model_shortages_df = st.session_state.model_shortages_df.drop(idx_ms).reset_index(drop=True)
-                            try:
-                                dl.save_model_shortages_to_db(st.session_state.model_shortages_df)
-                            except Exception:
-                                pass
-                            st.toast("Item removed", icon="🗑️")
-                            st.rerun()
+                    c_qty = int(row_ms['Clearance Qty'])
+                    tcf1_tmp = locals().get('tcf1_drops', None)
+                    tcf2_tmp = locals().get('tcf2_drops', None)
+                    vins_today = get_backflushed_vin_count_for_model_trims(row_ms['Model'], row_ms.get('Trims', 'All Trims'), tcf1_tmp, tcf2_tmp)
+                    true_buf = max(0, c_qty - vins_today)
+                    if true_buf <= 0:
+                        status_badge = f"<span style='background:#FEE2E2; color:#DC2626; padding:2px 6px; border-radius:6px; font-weight:700; font-size:11px;'>🚨 SHORTAGE (VIN: {vins_today})</span>"
+                    else:
+                        status_badge = f"<span style='background:#DCFCE7; color:#166534; padding:2px 6px; border-radius:6px; font-weight:600; font-size:11px;'>🟢 OK: {true_buf} (VIN: {vins_today})</span>"
+                    
+                    ms_card_border = '#30363D' if is_dark_theme else '#E5E7EB'
+                    ms_card_bg = '#1F2937' if is_dark_theme else '#F9FAFB'
+                    st.markdown(f"""<div style="background:{ms_card_bg}; border:1px solid {ms_card_border}; border-radius:8px; padding:8px 10px; margin-bottom:6px; font-family:'Inter',sans-serif;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; gap:4px;">
+                            <span style="font-weight:700; font-size:12px; color:{label_color};">{row_ms['Model']}</span>
+                            <span style="font-size:11px; color:{sub_text_color};">{row_ms.get('Trims','All Trims')}</span>
+                        </div>
+                        <div style="font-size:12px; color:{label_color}; margin:2px 0;">{row_ms['Part Name']} · Qty: <b>{c_qty}</b></div>
+                        <div>{status_badge}</div>
+                    </div>""", unsafe_allow_html=True)
+                    if st.button("🗑️", key=f"del_ms_{idx_ms}", help="Delete item", use_container_width=False):
+                        st.session_state.model_shortages_df = st.session_state.model_shortages_df.drop(idx_ms).reset_index(drop=True)
+                        try:
+                            dl.save_model_shortages_to_db(st.session_state.model_shortages_df)
+                        except Exception:
+                            pass
+                        st.toast("Item removed", icon="🗑️")
+                        st.rerun()
 
                 if st.button("🗑️ Clear All Model Shortages", key="clear_all_ms_btn", use_container_width=True):
                     st.session_state.model_shortages_df = pd.DataFrame(columns=['Model', 'Trims', 'Part Name', 'Clearance Qty'])
@@ -1142,9 +1468,9 @@ with config_expander:
             new_eng_input_vals = {}
 
             st.markdown("<div style='font-weight: 700; font-size: 13px; color: #3B82F6; margin-top: 6px; margin-bottom: 6px;'>TCF1 Engines (Punch ICE)</div>", unsafe_allow_html=True)
-            tcf1_cols = st.columns(4)
+            tcf1_cols = st.columns(3)
             for idx, (p_no, model_name) in enumerate(tcf1_engine_list):
-                c_idx = idx % 4
+                c_idx = idx % 3
                 curr_val = eng_vals.get(p_no, 0)
                 with tcf1_cols[c_idx]:
                     st.markdown(f"<div style='font-weight: 700; font-size: 12px; color: {label_color}; margin-bottom: 3px; word-break: break-word;'>{model_name}</div>", unsafe_allow_html=True)
@@ -1158,10 +1484,10 @@ with config_expander:
                     )
 
             st.markdown("<div style='font-weight: 700; font-size: 13px; color: #3B82F6; margin-top: 10px; margin-bottom: 6px;'>TCF2 Engines (Harrier / Safari ICE)</div>", unsafe_allow_html=True)
-            tcf2_cols = st.columns(4)
+            tcf2_cols = st.columns(3)
             for idx, (p_no, model_name) in enumerate(tcf2_engine_list):
                 curr_val = eng_vals.get(p_no, 0)
-                with tcf2_cols[idx]:
+                with tcf2_cols[idx % 3]:
                     st.markdown(f"<div style='font-weight: 700; font-size: 12px; color: {label_color}; margin-bottom: 3px; word-break: break-word;'>{model_name}</div>", unsafe_allow_html=True)
                     new_eng_input_vals[p_no] = st.number_input(
                         label=model_name,
@@ -1294,9 +1620,20 @@ try:
         paint_summary_dict = dl.load_paint_summary_report(loaded_data['FLOAT_PAINT_SUMMARY']) if 'FLOAT_PAINT_SUMMARY' in loaded_data else None
         paint_summary_vc_dict = dl.load_paint_summary_by_vc(loaded_data['FLOAT_PAINT_SUMMARY']) if 'FLOAT_PAINT_SUMMARY' in loaded_data else None
         
-        # 3. Load VGL drops & Shop-Wise Report
+        # 3. Load VGL drops, Shop-Wise Report & Hourly Production
         tcf1_drops = dl.load_vgl(loaded_data['TCF1_VGL']) if 'TCF1_VGL' in loaded_data else None
         tcf2_drops = dl.load_vgl(loaded_data['TCF2_VGL']) if 'TCF2_VGL' in loaded_data else None
+        
+        hourly_df = None
+        if 'HOURLY_PRODUCTION' in loaded_data:
+            hourly_df = dl.load_hourly_production(loaded_data['HOURLY_PRODUCTION'])
+        if hourly_df is None:
+            for cand_dir in [active_dir, workspace_dir]:
+                cand_file = os.path.join(cand_dir, "Dashboard files.xlsm")
+                if os.path.exists(cand_file):
+                    hourly_df = dl.load_hourly_production(cand_file)
+                    if hourly_df is not None:
+                        break
         
         shop_totals = None
         shop_vehicles_df = None
@@ -1366,8 +1703,8 @@ try:
         if 'TCF2_COCKPIT_STOCK' in loaded_data:
             tcf2_cockpit_start, tcf2_cockpit_vc_map = dl.load_stock_grouped(
                 loaded_data['TCF2_COCKPIT_STOCK'],
-                sheet_name='Fresh vin PPC',
-                vc_col_idx=3, part_col_idx=1, qty_col_idx=9, skip_rows=3
+                sheet_name='Fresh VIN PPC',
+                vc_col_idx=3, part_col_idx=1, qty_col_idx=10, skip_rows=3
             )
             
         # Load Engine Stock from data_editor
@@ -1998,14 +2335,84 @@ if active_clearance_shortage_alerts:
     st.markdown(alert_box_html, unsafe_allow_html=True)
 
 # Toggle between TCF1, TCF2, Total Float Details, Combined Summary & Reports (Opening tab: Summary Report & Excel Download)
-tcf_tabs = st.tabs([
+# Kept as one list (instead of inlining into st.tabs) so the sidebar's Quick
+# Navigation buttons below reference the exact same label strings that
+# st.tabs(key=...) tracks in st.session_state -- no risk of the two drifting apart.
+_tcf_tab_labels = [
     "📈 Summary Report & Excel Download",
-    "🏭 TCF 1 Line (Altroz/Punch/Nova)", 
-    "🏭 TCF 2 Line (Harrier/Safari)", 
+    "🧩 Cockpit WH & Wiring Shortage Reports",
+    "🏭 TCF 1 Line (Altroz/Punch/Nova)",
+    "🏭 TCF 2 Line (Harrier/Safari)",
     "🔍 Total Float Details & Search",
     "📋 Quality Hold Registry",
     "📱 Telegram Dispatcher"
-])
+]
+_tcf_tab_nav_short = [
+    "📈 Summary Report",
+    "🧩 Shortage Reports",
+    "🏭 TCF 1 Line",
+    "🏭 TCF 2 Line",
+    "🔍 Total Float Details",
+    "📋 Quality Hold",
+    "📱 Telegram Dispatcher",
+]
+
+def _sidebar_go_to_tab(label):
+    st.session_state["active_tcf_tab"] = label
+
+# ----------------- SIDEBAR: Quick Navigation -----------------
+st.sidebar.markdown("---")
+st.sidebar.markdown("#### 🧭 Quick Navigation")
+_current_tab = st.session_state.get("active_tcf_tab", _tcf_tab_labels[0])
+for _full_label, _short_label in zip(_tcf_tab_labels, _tcf_tab_nav_short):
+    st.sidebar.button(
+        _short_label,
+        width="stretch",
+        type="primary" if _full_label == _current_tab else "secondary",
+        key=f"nav_btn_{_full_label}",
+        on_click=_sidebar_go_to_tab,
+        args=(_full_label,)
+    )
+
+# ----------------- SIDEBAR: Status -----------------
+st.sidebar.markdown("---")
+st.sidebar.markdown("#### 📊 Status")
+
+_source_label = "🧪 TEST Directory (Sample Data)" if st.session_state.get('data_source_dir') == 'TEST Directory (Sample Data)' else "🏭 Production (Live Files)"
+st.sidebar.caption(f"**Data source:** {_source_label}")
+
+if st.session_state.get('run_report'):
+    st.sidebar.caption("**Report:** ✅ Generated")
+else:
+    st.sidebar.caption("**Report:** ⏳ Pending")
+
+_last_gen_sidebar = st.session_state.get('last_generated_at')
+if _last_gen_sidebar is not None:
+    st.sidebar.caption(f"**Last generated:** {_last_gen_sidebar.strftime('%d-%m-%Y %I:%M %p')}")
+
+_last_sync_sidebar = st.session_state.get('last_onedrive_sync')
+if _last_sync_sidebar is not None:
+    st.sidebar.caption(f"**Last OneDrive sync:** {_last_sync_sidebar.strftime('%d-%m-%Y %I:%M %p')}")
+
+if st.session_state.get('telegram_auto_send_15m', False):
+    st.sidebar.caption("**Auto-refresh:** every 60s (Telegram auto-send)")
+elif db_auto_sync:
+    st.sidebar.caption("**Auto-refresh:** every 5 min (OneDrive sync)")
+
+if active_clearance_shortage_alerts:
+    st.sidebar.error(f"🚨 {len(active_clearance_shortage_alerts)} active shortage alert{'s' if len(active_clearance_shortage_alerts) > 1 else ''}")
+else:
+    st.sidebar.success("✅ No active shortage alerts")
+
+# key + on_change="rerun" lets the tabs track their active tab in
+# st.session_state["active_tcf_tab"] (Streamlit >=1.63 feature), which is
+# exactly what the sidebar buttons above write to -- this is what makes
+# "Quick Navigation" actually switch tabs instead of just scrolling.
+tcf_tabs = st.tabs(
+    _tcf_tab_labels,
+    key="active_tcf_tab",
+    on_change="rerun"
+)
 
 # Helper function to style allocation dataframe rows
 def style_alloc_table(df):
@@ -2090,8 +2497,8 @@ def plot_stock_chart(start, true, final, title):
     plt.tight_layout()
     st.pyplot(fig)
 
-# ----------------- TAB 2: TCF 1 LINE -----------------
-with tcf_tabs[1]:
+# ----------------- TAB 3: TCF 1 LINE -----------------
+with tcf_tabs[2]:
     # KPIs
     ready_count = len(tcf1_alloc_df[tcf1_alloc_df['STATUS'] == '✅ Ready for TCF']) if not tcf1_alloc_df.empty else 0
     blocked_count = len(tcf1_alloc_df[tcf1_alloc_df['STATUS'] == '🚫 Blocked']) if not tcf1_alloc_df.empty else 0
@@ -2168,10 +2575,10 @@ with tcf_tabs[1]:
                     ),
                     "Cab location": st.column_config.TextColumn("Cab Location", disabled=True),
                     "Engine_Part": st.column_config.TextColumn("Engine Part", disabled=True),
-                    "Cockpit_Part": st.column_config.TextColumn("Cockpit Part", disabled=True),
+                    "Cockpit_Part": st.column_config.TextColumn("Cockpit WH Part", disabled=True),
                     "Wiring_Part": st.column_config.TextColumn("Wiring Part", disabled=True),
                     "Engine_Stock_After": st.column_config.NumberColumn("Eng Stock After", disabled=True),
-                    "Cockpit_Stock_After": st.column_config.NumberColumn("CK Stock After", disabled=True),
+                    "Cockpit_Stock_After": st.column_config.NumberColumn("CK WH Stock After", disabled=True),
                     "Wiring_Stock_After": st.column_config.NumberColumn("WH Stock After", disabled=True),
                 },
             )
@@ -2308,8 +2715,8 @@ with tcf_tabs[1]:
     with line_subtabs[1]:
         render_total_float_details_view(temp_float_df, default_line="TCF1")
 
-# ----------------- TAB 3: TCF 2 LINE -----------------
-with tcf_tabs[2]:
+# ----------------- TAB 4: TCF 2 LINE -----------------
+with tcf_tabs[3]:
     # KPIs
     ready_count_tcf2 = len(tcf2_alloc_df[tcf2_alloc_df['STATUS'] == '✅ Ready for TCF']) if not tcf2_alloc_df.empty else 0
     blocked_count_tcf2 = len(tcf2_alloc_df[tcf2_alloc_df['STATUS'] == '🚫 Blocked']) if not tcf2_alloc_df.empty else 0
@@ -2386,10 +2793,10 @@ with tcf_tabs[2]:
                     ),
                     "Cab location": st.column_config.TextColumn("Cab Location", disabled=True),
                     "Engine_Part": st.column_config.TextColumn("Engine Part", disabled=True),
-                    "Cockpit_Part": st.column_config.TextColumn("Cockpit Part", disabled=True),
+                    "Cockpit_Part": st.column_config.TextColumn("Cockpit WH Part", disabled=True),
                     "Wiring_Part": st.column_config.TextColumn("Wiring Part", disabled=True),
                     "Engine_Stock_After": st.column_config.NumberColumn("Eng Stock After", disabled=True),
-                    "Cockpit_Stock_After": st.column_config.NumberColumn("CK Stock After", disabled=True),
+                    "Cockpit_Stock_After": st.column_config.NumberColumn("CK WH Stock After", disabled=True),
                     "Wiring_Stock_After": st.column_config.NumberColumn("WH Stock After", disabled=True),
                 },
             )
@@ -2526,12 +2933,12 @@ with tcf_tabs[2]:
     with line_subtabs_tcf2[1]:
         render_total_float_details_view(temp_float_df, default_line="TCF2")
 
-# ----------------- TAB 4: TOTAL FLOAT DETAILS & SEARCH -----------------
-with tcf_tabs[3]:
+# ----------------- TAB 5: TOTAL FLOAT DETAILS & SEARCH -----------------
+with tcf_tabs[4]:
     render_total_float_details_view(temp_float_df, default_line="All")
 
-# ----------------- TAB 5: QUALITY HOLD REGISTRY -----------------
-with tcf_tabs[4]:
+# ----------------- TAB 6: QUALITY HOLD REGISTRY -----------------
+with tcf_tabs[5]:
     st.markdown("### 📋 Quality Hold Registry")
     st.markdown("Overview of all vehicles currently placed on quality hold in the Paint Shop and PBS buffer.")
     
@@ -2671,8 +3078,8 @@ with tcf_tabs[4]:
         
 
 
-# ----------------- TAB 6: TELEGRAM DISPATCHER -----------------
-with tcf_tabs[5]:
+# ----------------- TAB 7: TELEGRAM DISPATCHER -----------------
+with tcf_tabs[6]:
     st.markdown("### 📱 Telegram Report Dispatcher")
     st.markdown("Send live shift production summaries and material shortage alerts directly to Telegram channels, groups, or planners.")
 
@@ -2801,8 +3208,8 @@ with tcf_tabs[5]:
             t40_val = int(shop_totals.get('T40', 0))
             
         if shop_vehicles_df is not None and not shop_vehicles_df.empty:
-            tcf1_m = shop_vehicles_df[shop_vehicles_df['Model'].isin(['PUNCH', 'PUNCH Exports', 'PUNCH EV'])]
-            tcf2_m = shop_vehicles_df[shop_vehicles_df['Model'].isin(['HARRIER EV', 'SAFARI', 'HARRIER'])]
+            tcf1_m = shop_vehicles_df[shop_vehicles_df['Model'].isin(['PUNCH', 'PUNCH Exports', 'PUNCH EV', 'ALTROZ'])]
+            tcf2_m = shop_vehicles_df[shop_vehicles_df['Model'].isin(['HARRIER EV', 'SAFARI', 'HARRIER', 'SAFARI EV'])]
             
             if not tcf1_m.empty:
                 tcf1_paint_val = int(tcf1_m['Paint Lifting'].sum())
@@ -2957,26 +3364,129 @@ TCF1: {tcf1_pbs_detail_str}
 
 TCF2: {tcf2_pbs_detail_str}"""
 
-        # ----------------- QUICK ACTIONS: SEND BOTH SCHEDULED REPORTS -----------------
-        # Moved to the top so the most common one-click action doesn't require
-        # scrolling past the full custom-dispatcher form to find it.
+        # ----------------- AUTO-SEND 3 REPORTS (15-MIN INTERVAL) -----------------
         with st.container(border=True):
-            qa_col1, qa_col2 = st.columns([3, 1.3])
+            as_col1, as_col2 = st.columns([3, 1.4])
+            with as_col1:
+                st.markdown("##### ⏰ Auto-Send 3 Reports (15-Minute Intervals)")
+                st.caption(
+                    "Automatically dispatches all 3 reports to Telegram at exact 15-minute clock intervals "
+                    "(e.g., **6:00 PM**, **6:15 PM**, **6:30 PM**, **6:45 PM**). Reports are **not** sent in-between."
+                )
+            with as_col2:
+                cur_auto_state = st.session_state.get('telegram_auto_send_15m', False)
+                tg_auto_toggle = st.toggle(
+                    "⏱️ **Auto-Send ON / OFF**",
+                    value=cur_auto_state,
+                    key="tg_auto_send_toggle"
+                )
+                if tg_auto_toggle != cur_auto_state:
+                    st.session_state.telegram_auto_send_15m = tg_auto_toggle
+                    try:
+                        dl.save_metadata('telegram_auto_send_15m', str(tg_auto_toggle))
+                    except Exception:
+                        pass
+                    if tg_auto_toggle:
+                        st.toast("⏰ 15-Minute Auto-Send Enabled! Reports will dispatch at :00, :15, :30, :45.", icon="⏰")
+                    else:
+                        st.toast("⏹️ 15-Minute Auto-Send Disabled.", icon="⏹️")
+                    st.rerun()
+
+            # Status information metrics
+            now_dt = get_ist_now()
+            last_sent_time = dl.load_metadata('last_auto_tg_sent_time', 'None yet')
+            last_sent_status = dl.load_metadata('last_auto_tg_status', 'Idle')
+            cur_slot = now_dt.strftime("%Y-%m-%d %H:%M")
+            last_sent_slot = dl.load_metadata('last_auto_tg_sent_slot', '')
+            
+            cur_min = now_dt.minute
+            rem_min = cur_min % 15
+            
+            if rem_min == 0 and last_sent_slot != cur_slot:
+                next_slot_str = now_dt.strftime("%I:%M %p (Dispatching now...)")
+            else:
+                add_mins = 15 - rem_min if rem_min != 0 else 15
+                next_trigger = (now_dt + datetime.timedelta(minutes=add_mins)).replace(second=0, microsecond=0)
+                next_slot_str = next_trigger.strftime("%I:%M %p")
+
+            m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+            with m_c1:
+                if cur_auto_state:
+                    st.markdown("🟢 **Status:** <span style='color:#10B981;font-weight:600;'>Active (:00, :15, :30, :45)</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown("⚪ **Status:** <span style='color:#6B7280;font-weight:600;'>Disabled (OFF)</span>", unsafe_allow_html=True)
+            with m_c2:
+                st.markdown(f"🕐 **Current IST:** `{now_dt.strftime('%I:%M %p')}`")
+            with m_c3:
+                st.markdown(f"⏳ **Next Trigger:** `{next_slot_str}`")
+            with m_c4:
+                st.markdown(f"📡 **Last Sent:** `{last_sent_time}`")
+
+            if cur_auto_state and last_sent_status and last_sent_status != 'Idle':
+                st.caption(f"ℹ️ {last_sent_status}")
+
+        # Auto-send execution check on 15-min mark (:00, :15, :30, :45)
+        if st.session_state.get('telegram_auto_send_15m', False):
+            now_ist = get_ist_now()
+            # Strictly check if current minute is exactly 0, 15, 30, or 45
+            if now_ist.minute in (0, 15, 30, 45):
+                slot_key = now_ist.strftime("%Y-%m-%d %H:%M")
+                last_slot_db = dl.load_metadata('last_auto_tg_sent_slot', '')
+                
+                if last_slot_db != slot_key:
+                    # Save slot immediately to prevent duplicate dispatches
+                    dl.save_metadata('last_auto_tg_sent_slot', slot_key)
+                    st.session_state.last_auto_tg_sent_slot = slot_key
+                    
+                    bot_tok = st.session_state.get('telegram_token', '').strip()
+                    chat_id_val = st.session_state.get('telegram_chat_id', '').strip()
+                    
+                    if bot_tok and chat_id_val:
+                        ok1, res1 = dl.send_telegram_message(bot_tok, chat_id_val, tg_report_1_text)
+                        ok2, res2 = dl.send_telegram_message(bot_tok, chat_id_val, tg_report_2_text)
+                        ok3, res3 = dl.send_telegram_message(bot_tok, chat_id_val, tg_report_3_text)
+                        
+                        ts_str = format_ist_now("%d-%m-%Y %I:%M %p")
+                        if ok1 and ok2 and ok3:
+                            msg_stat = f"✅ All 3 reports auto-dispatched successfully at {now_ist.strftime('%I:%M %p')}"
+                            dl.save_metadata('last_auto_tg_sent_time', ts_str)
+                            dl.save_metadata('last_auto_tg_status', msg_stat)
+                            st.session_state.last_auto_tg_sent_time = ts_str
+                            st.session_state.last_auto_tg_status = msg_stat
+                            st.toast(f"🚀 Auto-dispatched 3 reports for {now_ist.strftime('%I:%M %p')} to Telegram!", icon="🚀")
+                        else:
+                            err_list = []
+                            if not ok1: err_list.append(f"Report 1: {res1}")
+                            if not ok2: err_list.append(f"Report 2: {res2}")
+                            if not ok3: err_list.append(f"Report 3: {res3}")
+                            msg_stat = f"⚠️ Dispatched with errors at {now_ist.strftime('%I:%M %p')}: {', '.join(err_list)}"
+                            dl.save_metadata('last_auto_tg_sent_time', ts_str)
+                            dl.save_metadata('last_auto_tg_status', msg_stat)
+                            st.session_state.last_auto_tg_sent_time = ts_str
+                            st.session_state.last_auto_tg_status = msg_stat
+                            st.toast(f"⚠️ Auto-send error at {now_ist.strftime('%I:%M %p')}", icon="⚠️")
+
+        # ----------------- QUICK ACTIONS: SEND ALL 3 SCHEDULED REPORTS -----------------
+        with st.container(border=True):
+            qa_col1, qa_col2 = st.columns([3, 1.4])
             with qa_col1:
                 st.markdown("##### ⚡ Quick Action")
-                st.caption("Send the TCF1 & TCF2 PPC Report and the Nova Status Report together, in one tap.")
+                st.caption("Send the TCF1 & TCF2 PPC Report, the Nova Status Report, and the Dropping vs. Paint Lifting Status Report together in one tap.")
             with qa_col2:
-                if st.button("🚀 Send BOTH Reports Now", type="secondary", use_container_width=True, key="send_both_tg_reports_btn"):
+                if st.button("🚀 Send ALL 3 Reports Now", type="secondary", use_container_width=True, key="send_all_tg_reports_btn"):
                     ok1, res_msg1 = dl.send_telegram_message(st.session_state.telegram_token, st.session_state.telegram_chat_id, tg_report_1_text)
                     ok2, res_msg2 = dl.send_telegram_message(st.session_state.telegram_token, st.session_state.telegram_chat_id, tg_report_2_text)
-                    if ok1 and ok2:
-                        st.toast("🚀 Both reports successfully sent to Telegram!", icon="🚀")
-                        st.success("✅ Both reports (TCF1 & TCF2 PPC Report & Nova Status Report) dispatched successfully!")
+                    ok3, res_msg3 = dl.send_telegram_message(st.session_state.telegram_token, st.session_state.telegram_chat_id, tg_report_3_text)
+                    if ok1 and ok2 and ok3:
+                        st.toast("🚀 All 3 reports successfully sent to Telegram!", icon="🚀")
+                        st.success("✅ All 3 reports (TCF1 & TCF2 PPC Report, Nova Status Report, and Dropping vs. Paint Lifting Status) dispatched successfully!")
                     else:
                         if not ok1:
                             st.error(f"Report 1 Error: {res_msg1}")
                         if not ok2:
                             st.error(f"Report 2 Error: {res_msg2}")
+                        if not ok3:
+                            st.error(f"Report 3 Error: {res_msg3}")
 
         st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
         st.caption("📅 **Scheduled Report Templates** (first 3 tabs) — preview and send one at a time · 💬 **Manual Dispatcher** (last tab) — free-text, screenshots, or file attachments")
@@ -3176,8 +3686,8 @@ with tcf_tabs[0]:
         if shop_vehicles_df is not None and not shop_vehicles_df.empty:
             st.markdown("#### 🚗 Model-Wise Production Matrix (TCF1 & TCF2 Breakdown)")
             
-            tcf1_models = ['PUNCH', 'PUNCH Exports', 'PUNCH EV']
-            tcf2_models = ['HARRIER EV', 'SAFARI', 'HARRIER']
+            tcf1_models = ['PUNCH', 'PUNCH Exports', 'PUNCH EV', 'ALTROZ', 'ALTROZ DCA', 'ALTROZ EV']
+            tcf2_models = ['HARRIER EV', 'SAFARI', 'HARRIER', 'SAFARI EV']
             
             df1 = shop_vehicles_df[shop_vehicles_df['Model'].isin(tcf1_models)].copy()
             df2 = shop_vehicles_df[shop_vehicles_df['Model'].isin(tcf2_models)].copy()
@@ -3341,6 +3851,444 @@ with tcf_tabs[0]:
                 key="export_prod_matrix_btn"
             )
             
+        st.markdown("---")
+
+    # --- SECTION 0.5: HOURLY PRODUCTION & GENERATION TRACKER (TCF1 & TCF2) ---
+    if hourly_df is not None and not hourly_df.empty:
+        st.markdown("### ⏱️ Hourly Production & Line Generation Tracker")
+        st.caption("Live hour-by-hour tracking of VIN Generation and TCF Dropping across TCF1 and TCF2 assembly lines (Format: **Hourly Output [Shift Cumulative Output]**).")
+        
+        point_col = 'ACHIEVEMENT POINT' if 'ACHIEVEMENT POINT' in hourly_df.columns else hourly_df.columns[0]
+        time_cols = [c for c in hourly_df.columns if '-' in str(c) and ('AM' in str(c).upper() or 'PM' in str(c).upper())]
+        tot_cols = [c for c in hourly_df.columns if 'TOTAL' in str(c).upper()]
+        
+        def _parse_cell_val(val):
+            if pd.isna(val):
+                return 0, 0
+            s = str(val).strip()
+            m = re.match(r'^(\d+)(?:\[(\d+)\])?$', s)
+            if m:
+                h = int(m.group(1))
+                c = int(m.group(2)) if m.group(2) else h
+                return h, c
+            try:
+                n = int(float(s))
+                return n, n
+            except Exception:
+                return 0, 0
+
+        def _fmt_cell(h, c):
+            if c != 0 or h != 0:
+                return f"{h}[{c}]"
+            return "0[0]"
+
+        rows_by_point = {}
+        for _, r in hourly_df.iterrows():
+            rows_by_point[str(r[point_col]).strip()] = r
+            
+        tcf1_vin = rows_by_point.get('TCF1_VIN_GENERATION')
+        tcf2_vin = rows_by_point.get('TCF2_VIN_GENERATION')
+        tcf1_drop = rows_by_point.get('TCF1-DROP')
+        tcf2_drop = rows_by_point.get('TCF2-DROP')
+        
+        # Calculate Total VIN Generation Row
+        tot_vin_row = {point_col: 'TOTAL VIN GENERATION'}
+        for c in time_cols:
+            h1, c1 = _parse_cell_val(tcf1_vin[c]) if tcf1_vin is not None else (0, 0)
+            h2, c2 = _parse_cell_val(tcf2_vin[c]) if tcf2_vin is not None else (0, 0)
+            tot_vin_row[c] = _fmt_cell(h1 + h2, c1 + c2)
+        for c in tot_cols:
+            v1 = int(tcf1_vin[c]) if tcf1_vin is not None and not pd.isna(tcf1_vin[c]) else 0
+            v2 = int(tcf2_vin[c]) if tcf2_vin is not None and not pd.isna(tcf2_vin[c]) else 0
+            tot_vin_row[c] = v1 + v2
+
+        # Calculate Total TCF Dropping Row
+        tot_drop_row = {point_col: 'TOTAL TCF DROPPING'}
+        for c in time_cols:
+            h1, c1 = _parse_cell_val(tcf1_drop[c]) if tcf1_drop is not None else (0, 0)
+            h2, c2 = _parse_cell_val(tcf2_drop[c]) if tcf2_drop is not None else (0, 0)
+            tot_drop_row[c] = _fmt_cell(h1 + h2, c1 + c2)
+        for c in tot_cols:
+            v1 = int(tcf1_drop[c]) if tcf1_drop is not None and not pd.isna(tcf1_drop[c]) else 0
+            v2 = int(tcf2_drop[c]) if tcf2_drop is not None and not pd.isna(tcf2_drop[c]) else 0
+            tot_drop_row[c] = v1 + v2
+
+        # KPI Metrics Row
+        kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5, kpi_col6 = st.columns(6)
+        
+        t1_vin_day = int(tcf1_vin['DAY TOTAL']) if tcf1_vin is not None and 'DAY TOTAL' in tcf1_vin else 0
+        t1_vin_sh_a = int(tcf1_vin['SHIFT A TOTAL']) if tcf1_vin is not None and 'SHIFT A TOTAL' in tcf1_vin else 0
+        t1_vin_sh_b = int(tcf1_vin['SHIFT B TOTAL']) if tcf1_vin is not None and 'SHIFT B TOTAL' in tcf1_vin else 0
+        
+        t2_vin_day = int(tcf2_vin['DAY TOTAL']) if tcf2_vin is not None and 'DAY TOTAL' in tcf2_vin else 0
+        t2_vin_sh_a = int(tcf2_vin['SHIFT A TOTAL']) if tcf2_vin is not None and 'SHIFT A TOTAL' in tcf2_vin else 0
+        t2_vin_sh_b = int(tcf2_vin['SHIFT B TOTAL']) if tcf2_vin is not None and 'SHIFT B TOTAL' in tcf2_vin else 0
+        
+        tot_vin_day = t1_vin_day + t2_vin_day
+        
+        t1_drop_day = int(tcf1_drop['DAY TOTAL']) if tcf1_drop is not None and 'DAY TOTAL' in tcf1_drop else 0
+        t1_drop_sh_a = int(tcf1_drop['SHIFT A TOTAL']) if tcf1_drop is not None and 'SHIFT A TOTAL' in tcf1_drop else 0
+        t1_drop_sh_b = int(tcf1_drop['SHIFT B TOTAL']) if tcf1_drop is not None and 'SHIFT B TOTAL' in tcf1_drop else 0
+        
+        t2_drop_day = int(tcf2_drop['DAY TOTAL']) if tcf2_drop is not None and 'DAY TOTAL' in tcf2_drop else 0
+        t2_drop_sh_a = int(tcf2_drop['SHIFT A TOTAL']) if tcf2_drop is not None and 'SHIFT A TOTAL' in tcf2_drop else 0
+        t2_drop_sh_b = int(tcf2_drop['SHIFT B TOTAL']) if tcf2_drop is not None and 'SHIFT B TOTAL' in tcf2_drop else 0
+        
+        tot_drop_day = t1_drop_day + t2_drop_day
+
+        kpi_col1.metric("TCF1 Day VIN", f"{t1_vin_day} cabs", f"A: {t1_vin_sh_a} | B: {t1_vin_sh_b}")
+        kpi_col2.metric("TCF2 Day VIN", f"{t2_vin_day} cabs", f"A: {t2_vin_sh_a} | B: {t2_vin_sh_b}")
+        kpi_col3.metric("Plant VIN Total", f"{tot_vin_day} cabs", f"TCF1 + TCF2")
+        kpi_col4.metric("TCF1 Day Drop", f"{t1_drop_day} cabs", f"A: {t1_drop_sh_a} | B: {t1_drop_sh_b}")
+        kpi_col5.metric("TCF2 Day Drop", f"{t2_drop_day} cabs", f"A: {t2_drop_sh_a} | B: {t2_drop_sh_b}")
+        kpi_col6.metric("Plant Drop Total", f"{tot_drop_day} cabs", f"TCF1 + TCF2")
+
+        table_rows_display = []
+        if tcf1_vin is not None:
+            table_rows_display.append(('TCF1_VIN_GENERATION', 'TCF1 VIN GENERATION', 'tcf1-vin', tcf1_vin))
+        if tcf2_vin is not None:
+            table_rows_display.append(('TCF2_VIN_GENERATION', 'TCF2 VIN GENERATION', 'tcf2-vin', tcf2_vin))
+        if tcf1_vin is not None or tcf2_vin is not None:
+            table_rows_display.append(('TOTAL_VIN', 'TOTAL VIN GENERATION', 'tot-vin', tot_vin_row))
+        if tcf1_drop is not None:
+            table_rows_display.append(('TCF1-DROP', 'TCF1 DROP', 'tcf1-drop', tcf1_drop))
+        if tcf2_drop is not None:
+            table_rows_display.append(('TCF2-DROP', 'TCF2 DROP', 'tcf2-drop', tcf2_drop))
+        if tcf1_drop is not None or tcf2_drop is not None:
+            table_rows_display.append(('TOTAL_DROP', 'TOTAL TCF DROPPING', 'tot-drop', tot_drop_row))
+
+        all_headers = [point_col] + time_cols + tot_cols
+
+        def _fmt_hdr_html(hdr_str):
+            s = str(hdr_str).strip()
+            if 'ACHIEVEMENT' in s.upper():
+                return "Stage / Line"
+            if 'SHIFT' in s.upper():
+                m = re.search(r'SHIFT\s*([A-Z])', s, re.I)
+                if m:
+                    return f"Shift {m.group(1).upper()}<br><span style='font-size:10px;font-weight:700;opacity:0.9;'>Total</span>"
+            if 'DAY' in s.upper():
+                return "Day Total<br><span style='font-size:10px;font-weight:700;opacity:0.9;'>Plant</span>"
+                
+            m = re.match(r'(\d{1,2})(?::(\d{2}))?\s*([AP]M)?\s*-\s*(\d{1,2})(?::(\d{2}))?\s*([AP]M)', s, re.I)
+            if m:
+                h1, m1, p1, h2, m2, p2 = m.groups()
+                t1 = f"{h1}:{m1}" if m1 and m1 != '00' else h1
+                t2 = f"{h2}:{m2}" if m2 and m2 != '00' else h2
+                period = p2 or p1 or ""
+                return f"{t1}-{t2}<br><span style='font-size:10px;font-weight:700;opacity:0.9;'>{period.upper()}</span>"
+            return s
+
+        html_hourly_table = f"""<style>
+.hourly-card {{
+    background: rgba(15, 23, 42, 0.02);
+    border: 1px solid rgba(226, 232, 240, 0.9);
+    border-radius: 12px;
+    padding: 8px 10px;
+    margin-top: 6px;
+    margin-bottom: 14px;
+    box-shadow: 0 4px 15px -3px rgba(0, 0, 0, 0.05);
+    overflow: hidden;
+    width: 100%;
+    box-sizing: border-box;
+}}
+.hourly-table {{
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 12.5px;
+}}
+.hourly-table th {{
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: #38bdf8;
+    padding: 8px 3px;
+    font-size: 12px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.25px;
+    text-align: center;
+    border-bottom: 2px solid #0284c7;
+    line-height: 1.25;
+    overflow: hidden;
+}}
+.hourly-table th:first-child {{ text-align: left; padding-left: 10px; width: 17%; }}
+.hourly-table th.th-time {{ width: 7.2%; }}
+.hourly-table th.th-shift {{ width: 5.7%; }}
+.hourly-table th.th-day {{ width: 7.5%; }}
+
+.hourly-table td {{
+    padding: 7px 3px;
+    color: #0f172a;
+    text-align: center;
+    border-bottom: 1px solid #cbd5e1;
+    font-weight: 700;
+    overflow: hidden;
+    white-space: nowrap;
+}}
+.hourly-table td:first-child {{ 
+    text-align: left; 
+    padding-left: 10px; 
+    white-space: normal;
+    word-break: break-word;
+    font-size: 12.5px;
+    font-weight: 800;
+}}
+.hourly-cell {{
+    font-family: 'JetBrains Mono', 'Consolas', monospace;
+    font-size: 12.5px;
+    letter-spacing: -0.3px;
+}}
+.hourly-val {{
+    font-weight: 900;
+    color: #0f172a;
+    font-size: 13px;
+}}
+.cum-val {{
+    color: #334155;
+    font-size: 11px;
+    font-weight: 700;
+}}
+.tr-tcf1-vin {{ background-color: #ffffff; }}
+.tr-tcf1-vin:hover {{ background-color: #f0f9ff; }}
+.tr-tcf2-vin {{ background-color: #ffffff; }}
+.tr-tcf2-vin:hover {{ background-color: #f0fdf4; }}
+.tr-tcf1-drop {{ background-color: #ffffff; }}
+.tr-tcf1-drop:hover {{ background-color: #f0fdfa; }}
+.tr-tcf2-drop {{ background-color: #ffffff; }}
+.tr-tcf2-drop:hover {{ background-color: #fff7ed; }}
+
+.tr-tot-vin td {{
+    background: linear-gradient(90deg, #1e40af 0%, #3b82f6 100%) !important;
+    color: #ffffff !important;
+    font-weight: 900 !important;
+    font-size: 13px !important;
+    border-top: 2px solid #1d4ed8 !important;
+    border-bottom: 2px solid #1d4ed8 !important;
+}}
+.tr-tot-vin .cum-val {{ color: #dbeafe !important; font-weight: 800 !important; }}
+.tr-tot-vin .hourly-val {{ color: #ffffff !important; font-size: 13.5px !important; font-weight: 900 !important; }}
+
+.tr-tot-drop td {{
+    background: linear-gradient(90deg, #0f766e 0%, #14b8a6 100%) !important;
+    color: #ffffff !important;
+    font-weight: 900 !important;
+    font-size: 13px !important;
+    border-top: 2px solid #0d9488 !important;
+    border-bottom: 2px solid #0d9488 !important;
+}}
+.tr-tot-drop .cum-val {{ color: #ccfbf1 !important; font-weight: 800 !important; }}
+.tr-tot-drop .hourly-val {{ color: #ffffff !important; font-size: 13.5px !important; font-weight: 900 !important; }}
+
+.badge-vin1 {{ background: #dbeafe; color: #1e40af; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 800; display: inline-block; }}
+.badge-vin2 {{ background: #e0e7ff; color: #4338ca; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 800; display: inline-block; }}
+.badge-drop1 {{ background: #dcfce7; color: #15803d; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 800; display: inline-block; }}
+.badge-drop2 {{ background: #ffedd5; color: #c2410c; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 800; display: inline-block; }}
+</style>
+<div class="hourly-card">
+<table class="hourly-table">
+<thead>
+<tr>"""
+        for i, col_hdr in enumerate(all_headers):
+            th_cls = "th-first" if i == 0 else ("th-day" if 'DAY' in str(col_hdr).upper() else ("th-shift" if 'SHIFT' in str(col_hdr).upper() else "th-time"))
+            html_hourly_table += f"<th class='{th_cls}'>{_fmt_hdr_html(col_hdr)}</th>"
+        html_hourly_table += "</tr></thead><tbody>"
+
+        for r_type, r_label, r_class, r_data in table_rows_display:
+            html_hourly_table += f'<tr class="tr-{r_class}">'
+            if r_type == 'TCF1_VIN_GENERATION':
+                html_hourly_table += f'<td><span class="badge-vin1">TCF1</span> &nbsp; <b>VIN Gen</b></td>'
+            elif r_type == 'TCF2_VIN_GENERATION':
+                html_hourly_table += f'<td><span class="badge-vin2">TCF2</span> &nbsp; <b>VIN Gen</b></td>'
+            elif r_type == 'TCF1-DROP':
+                html_hourly_table += f'<td><span class="badge-drop1">TCF1</span> &nbsp; <b>Drop</b></td>'
+            elif r_type == 'TCF2-DROP':
+                html_hourly_table += f'<td><span class="badge-drop2">TCF2</span> &nbsp; <b>Drop</b></td>'
+            elif r_type == 'TOTAL_VIN':
+                html_hourly_table += f'<td>🔹 <b>TOTAL VIN</b></td>'
+            elif r_type == 'TOTAL_DROP':
+                html_hourly_table += f'<td>🔸 <b>TOTAL DROP</b></td>'
+            else:
+                html_hourly_table += f'<td><b>{r_label}</b></td>'
+
+            for c in time_cols:
+                val_str = str(r_data.get(c, '0[0]'))
+                h, cum = _parse_cell_val(val_str)
+                html_hourly_table += f'<td class="hourly-cell"><span class="hourly-val">{h}</span><span class="cum-val"> [{cum}]</span></td>'
+
+            for c in tot_cols:
+                val = r_data.get(c, 0)
+                html_hourly_table += f'<td><b>{val}</b></td>'
+
+            html_hourly_table += '</tr>'
+
+        html_hourly_table += "</tbody></table></div>"
+        st.markdown(html_hourly_table, unsafe_allow_html=True)
+
+        # Visual Analytics: TCF1 and TCF2 Attractive Separate Dropping Charts
+        with st.expander("📈 View Hourly Dropping Line Charts (TCF1 & TCF2 Separate Lines)", expanded=False):
+            tcf1_drop_data = []
+            tcf2_drop_data = []
+            for c in time_cols:
+                h1_d, _ = _parse_cell_val(tcf1_drop[c]) if tcf1_drop is not None else (0, 0)
+                h2_d, _ = _parse_cell_val(tcf2_drop[c]) if tcf2_drop is not None else (0, 0)
+                m = re.match(r'(\d{1,2})(?::(\d{2}))?\s*([AP]M)?\s*-\s*(\d{1,2})(?::(\d{2}))?\s*([AP]M)', str(c), re.I)
+                if m:
+                    h1, m1, p1, h2, m2, p2 = m.groups()
+                    t1 = f"{h1}:{m1}" if m1 and m1 != '00' else h1
+                    t2 = f"{h2}:{m2}" if m2 and m2 != '00' else h2
+                    period = p2 or p1 or ""
+                    slot_label = f"{t1}-{t2} {period.upper()}"
+                else:
+                    slot_label = str(c).replace(':00', '').replace(' ', '')
+                tcf1_drop_data.append({
+                    'Time Slot': slot_label,
+                    'Hourly Cabs Dropped': h1_d
+                })
+                tcf2_drop_data.append({
+                    'Time Slot': slot_label,
+                    'Hourly Cabs Dropped': h2_d
+                })
+
+            def _build_attractive_drop_chart(data_list, color_theme):
+                df_c = pd.DataFrame(data_list)
+                max_v = df_c['Hourly Cabs Dropped'].max() if not df_c.empty else 10
+                y_max = max(max_v * 1.35, max_v + 6)
+                
+                base_c = alt.Chart(df_c).encode(
+                    x=alt.X('Time Slot:N', sort=None, title=None, axis=alt.Axis(labelAngle=-25, labelFontSize=11, labelFontWeight='bold', labelColor='#334155')),
+                    y=alt.Y('Hourly Cabs Dropped:Q', title='Cabs / Hour', scale=alt.Scale(domain=[0, y_max]), axis=alt.Axis(grid=True, gridColor='rgba(0,0,0,0.06)', labelFontSize=11, labelFontWeight='bold'))
+                )
+                
+                area_c = base_c.mark_area(
+                    opacity=0.18,
+                    color=color_theme
+                )
+                
+                line_c = base_c.mark_line(
+                    color=color_theme,
+                    size=3.5,
+                    interpolate='monotone'
+                )
+                
+                points_c = base_c.mark_circle(
+                    size=120,
+                    color=color_theme,
+                    opacity=1
+                )
+                
+                points_inner = base_c.mark_circle(
+                    size=35,
+                    color='#ffffff',
+                    opacity=1
+                )
+                
+                text_c = base_c.mark_text(
+                    align='center',
+                    baseline='bottom',
+                    dy=-10,
+                    fontSize=13,
+                    fontWeight='bold',
+                    color=color_theme
+                ).encode(
+                    text='Hourly Cabs Dropped:Q'
+                )
+                
+                final_chart = (area_c + line_c + points_c + points_inner + text_c).properties(
+                    height=270
+                ).configure_view(
+                    strokeWidth=0
+                )
+                return final_chart
+
+            chart_col1, chart_col2 = st.columns(2)
+            with chart_col1:
+                st.markdown("##### 🟢 TCF1 Line Hourly Dropping Trend")
+                if tcf1_drop_data:
+                    chart_tcf1 = _build_attractive_drop_chart(tcf1_drop_data, '#059669')
+                    st.altair_chart(chart_tcf1, use_container_width=True)
+            with chart_col2:
+                st.markdown("##### 🟠 TCF2 Line Hourly Dropping Trend")
+                if tcf2_drop_data:
+                    chart_tcf2 = _build_attractive_drop_chart(tcf2_drop_data, '#ea580c')
+                    st.altair_chart(chart_tcf2, use_container_width=True)
+
+        # Excel Export for Hourly Production Tracker
+        export_hourly_rows = []
+        for r_type, r_label, r_class, r_data in table_rows_display:
+            row_dict = {'ACHIEVEMENT POINT': r_label}
+            for c in time_cols:
+                row_dict[c] = r_data.get(c, '0[0]')
+            for c in tot_cols:
+                row_dict[c] = r_data.get(c, 0)
+            export_hourly_rows.append(row_dict)
+            
+        df_export_hourly = pd.DataFrame(export_hourly_rows)
+        
+        buf_hourly = io.BytesIO()
+        with pd.ExcelWriter(buf_hourly, engine='openpyxl') as writer_hourly:
+            df_export_hourly.to_excel(writer_hourly, index=False, sheet_name='Hourly Production')
+            ws_h = writer_hourly.sheets['Hourly Production']
+            
+            f_hdr = Font(name='Calibri', size=11, bold=True, color='000000')
+            fill_hdr = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
+            f_sub = Font(name='Calibri', size=11, bold=True, color='000000')
+            fill_sub_v = PatternFill(start_color='BDD7EE', end_color='BDD7EE', fill_type='solid')
+            fill_sub_d = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+            f_norm = Font(name='Calibri', size=11, color='000000')
+            b_thin = Border(
+                left=Side(style='thin', color='BFBFBF'),
+                right=Side(style='thin', color='BFBFBF'),
+                top=Side(style='thin', color='BFBFBF'),
+                bottom=Side(style='thin', color='BFBFBF')
+            )
+            
+            ws_h.row_dimensions[1].height = 28
+            for c_i in range(1, len(df_export_hourly.columns) + 1):
+                c_cell = ws_h.cell(row=1, column=c_i)
+                c_cell.font = f_hdr
+                c_cell.fill = fill_hdr
+                c_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                c_cell.border = b_thin
+                
+            for r_i in range(2, len(df_export_hourly) + 2):
+                ws_h.row_dimensions[r_i].height = 22
+                pt_val = str(ws_h.cell(row=r_i, column=1).value).strip().upper()
+                is_tot_v = 'TOTAL VIN' in pt_val
+                is_tot_d = 'TOTAL TCF DROP' in pt_val or 'TOTAL DROP' in pt_val
+                
+                for c_i in range(1, len(df_export_hourly.columns) + 1):
+                    cell_obj = ws_h.cell(row=r_i, column=c_i)
+                    cell_obj.border = b_thin
+                    if c_i == 1:
+                        cell_obj.alignment = Alignment(horizontal='left', vertical='center')
+                    else:
+                        cell_obj.alignment = Alignment(horizontal='center', vertical='center')
+                        
+                    if is_tot_v:
+                        cell_obj.font = f_sub
+                        cell_obj.fill = fill_sub_v
+                    elif is_tot_d:
+                        cell_obj.font = f_sub
+                        cell_obj.fill = fill_sub_d
+                    else:
+                        cell_obj.font = f_norm
+                        
+            for col in ws_h.columns:
+                m_len = max(len(str(cell.value or '')) for cell in col)
+                c_let = openpyxl.utils.get_column_letter(col[0].column)
+                ws_h.column_dimensions[c_let].width = max(m_len + 4, 14)
+
+        st.download_button(
+            label="📥 Export Hourly Production Tracker to Excel",
+            data=buf_hourly.getvalue(),
+            file_name="Hourly_Production_Tracker.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_hourly_prod_btn"
+        )
         st.markdown("---")
 
     st.markdown("### 📊 Paint Shop Float Summary")
@@ -4041,12 +4989,7 @@ with tcf_tabs[0]:
             
         st.markdown(render_html_table_2(table2_rows, is_dark_theme), unsafe_allow_html=True)
         
-        # ----------------- COCKPIT & WIRING SHORTAGE REPORTS (EXACT USER FORMAT) -----------------
-        st.markdown("---")
-        st.markdown("### 🧩 Cockpit & Wiring Shortage Reports")
-        st.markdown("""
-            These reports track Cockpit and Wiring Harness shortage requirements in the exact layout matching engine summary sheet models.
-        """)
+        # ----------------- COCKPIT & WIRING SHORTAGE DATA PREPARATION -----------------
         
         # Helper to build shortage table for Cockpit or Front Wiring
         def build_formatted_shortage_table(part_col_name, stock_tcf1, stock_tcf2, bom_df, float_df, paint_summary_vc_dict, tcf1_drops, tcf2_drops, only_shortage=True):
@@ -4070,15 +5013,20 @@ with tcf_tabs[0]:
             vc_to_part = dict(zip(bom_df['Short Vehicle Code'].astype(str).str.strip(), bom_df[part_col_name].astype(str).str.strip()))
             
             part_to_models = {}
+            part_to_vcs = {}
             part_to_line = {}
             
             for idx, row in bom_df.iterrows():
                 eng = str(row.get('Engine', '')).strip()
                 part = str(row.get(part_col_name, '')).strip()
+                vc = str(row.get('Short Vehicle Code', '')).strip()
                 mdl = local_engine_to_model.get(eng, '')
                 line = local_engine_to_line.get(eng, '')
-                if mdl and part and part not in ['None', 'nan', '0']:
-                    part_to_models.setdefault(part, set()).add(mdl)
+                if part and part not in ['None', 'nan', '0']:
+                    if mdl:
+                        part_to_models.setdefault(part, set()).add(mdl)
+                    if vc and vc not in ['None', 'nan', '0']:
+                        part_to_vcs.setdefault(part, set()).add(vc)
                     if line:
                         part_to_line[part] = line
                         
@@ -4123,7 +5071,7 @@ with tcf_tabs[0]:
                                 today_vin_dict[p_str] = today_vin_dict.get(p_str, 0) + cnt
 
             table_rows = []
-            header_part_name = 'Cockpit Part Number' if 'Cockpit' in part_col_name else 'Wiring Part Number'
+            header_part_name = 'Cockpit WH Part Number' if 'Cockpit' in part_col_name else 'Wiring Part Number'
             
             stk_1 = stock_tcf1 if stock_tcf1 is not None else {}
             stk_2 = stock_tcf2 if stock_tcf2 is not None else {}
@@ -4148,6 +5096,7 @@ with tcf_tabs[0]:
                 if not only_shortage or (sh_pbs < 0 or sh_sealant < 0 or sh_total < 0):
                     table_rows.append({
                         header_part_name: part,
+                        'VC Number': ', '.join(sorted(part_to_vcs.get(part, []))),
                         'Model': ', '.join(sorted(mdls)),
                         'LINE': line,
                         'Clearance After 6:30AM': stock,
@@ -4202,17 +5151,17 @@ with tcf_tabs[0]:
                         'Excess Qty': vin_nova - c_q
                     })
                     
-        # 3. Cockpit
+        # 3. Cockpit WH
         if df_cpt_all is not None and not df_cpt_all.empty:
             for idx, r_c in df_cpt_all.iterrows():
-                p_hdr = 'Cockpit Part Number'
+                p_hdr = 'Cockpit WH Part Number'
                 c_no = r_c.get(p_hdr, '')
                 m_descr = r_c.get('Model', '')
                 cl_c = r_c.get('Clearance After 6:30AM', 0)
                 vin_c = r_c.get('Today VIN', 0)
                 if isinstance(cl_c, (int, float)) and vin_c > cl_c:
                     excess_alerts.append({
-                        'Category': 'Cockpit',
+                        'Category': 'Cockpit WH',
                         'Model / Part': f"{c_no} ({m_descr})",
                         'Clearance 6:30 AM': cl_c,
                         'Today VIN': vin_c,
@@ -4236,52 +5185,7 @@ with tcf_tabs[0]:
                         'Excess Qty': vin_w - cl_w
                     })
 
-        # Render alert banner if any excess exists
-        if excess_alerts:
-            header_title = f"🚨 ALERT: TODAY VIN GENERATION EXCEEDS CLEARANCE AFTER 6:30 AM ({len(excess_alerts)} Item{'s' if len(excess_alerts) > 1 else ''})"
-            bg_card = '#2C121A' if is_dark_theme else '#FFF1F2'
-            title_color = '#FDA4AF' if is_dark_theme else '#9F1239'
-            sub_color = '#94A3B8' if is_dark_theme else '#64748B'
-            text_col = '#FAFAFA' if is_dark_theme else '#111827'
-            th_bg = '#4C1D24' if is_dark_theme else '#FFE4E6'
-            border_hdr = '#881337' if is_dark_theme else '#FECDD3'
-            border_td = '#5F1D28' if is_dark_theme else '#FFE4E6'
-            cat_col = '#FB7185' if is_dark_theme else '#E11D48'
-            vin_col = '#F43F5E' if is_dark_theme else '#BE123C'
-            exc_bg = '#881337' if is_dark_theme else '#FECDD3'
-            exc_col = '#FFF' if is_dark_theme else '#9F1239'
-            
-            rows_html = ""
-            for a in excess_alerts:
-                rows_html += (
-                    f"<tr>"
-                    f"<td style='padding: 7px 8px; border: 1px solid {border_td}; font-weight: 600; color: {cat_col};'>{a['Category']}</td>"
-                    f"<td style='padding: 7px 8px; border: 1px solid {border_td};'>{a['Model / Part']}</td>"
-                    f"<td style='padding: 7px 8px; border: 1px solid {border_td}; text-align: center;'>{a['Clearance 6:30 AM']}</td>"
-                    f"<td style='padding: 7px 8px; border: 1px solid {border_td}; text-align: center; font-weight: bold; color: {vin_col};'>{a['Today VIN']}</td>"
-                    f"<td style='padding: 7px 8px; border: 1px solid {border_td}; text-align: center; font-weight: bold; background-color: {exc_bg}; color: {exc_col};'>+{a['Excess Qty']}</td>"
-                    f"</tr>"
-                )
-                
-            alert_box_html = (
-                f"<div style='border: 2px solid #E11D48; border-radius: 10px; background-color: {bg_card}; padding: 14px; margin-top: 15px; margin-bottom: 20px;'>"
-                f"<div style='font-weight: 700; font-size: 15px; color: {title_color}; margin-bottom: 6px;'>{header_title}</div>"
-                f"<div style='font-size: 12px; color: {sub_color}; margin-bottom: 10px;'>The following parts / aggregates have Today VIN quantity exceeding the 6:30 AM Clearance quantity:</div>"
-                f"<table style='width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 12px; color: {text_col};'>"
-                f"<thead>"
-                f"<tr style='background-color: {th_bg}; text-align: left;'>"
-                f"<th style='padding: 8px; border: 1px solid {border_hdr};'>Category</th>"
-                f"<th style='padding: 8px; border: 1px solid {border_hdr};'>Model / Part Description</th>"
-                f"<th style='padding: 8px; border: 1px solid {border_hdr}; text-align: center;'>Clearance After 6:30AM</th>"
-                f"<th style='padding: 8px; border: 1px solid {border_hdr}; text-align: center;'>Today VIN</th>"
-                f"<th style='padding: 8px; border: 1px solid {border_hdr}; text-align: center;'>Excess VIN Qty</th>"
-                f"</tr>"
-                f"</thead>"
-                f"<tbody>{rows_html}</tbody>"
-                f"</table>"
-                f"</div>"
-            )
-            st.markdown(alert_box_html, unsafe_allow_html=True)
+
 
 
         def render_html_formatted_shortage(df, part_header_name, is_dark):
@@ -4344,11 +5248,7 @@ with tcf_tabs[0]:
             html += "</tbody></table></div>"
             return html
 
-        st.markdown("#### 🚗 Cockpit Shortage Report")
-        st.markdown(render_html_formatted_shortage(df_cpt_shortage, "Cockpit Part Number", is_dark_theme), unsafe_allow_html=True)
 
-        st.markdown("#### ⚡ Wiring Harness Shortage Report")
-        st.markdown(render_html_formatted_shortage(df_wir_shortage, "Wiring Part Number", is_dark_theme), unsafe_allow_html=True)
         
         # Excel generator with beautiful color schemes matching attached copy
         import io
@@ -4521,9 +5421,9 @@ with tcf_tabs[0]:
                     cell.font = font_header
                     cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                     cell.border = thin_border
-                    if c_i <= 3:
+                    if c_i <= 4:
                         cell.fill = fill_peach
-                    elif c_i <= 8:
+                    elif c_i <= 9:
                         cell.fill = fill_blue
                     else:
                         cell.fill = fill_blue2
@@ -4537,7 +5437,7 @@ with tcf_tabs[0]:
                         cell.value = val
                         cell.border = thin_border
                         cell.font = font_normal
-                        cell.alignment = Alignment(horizontal='center' if col_name != 'Model' else 'left', vertical='center')
+                        cell.alignment = Alignment(horizontal='left' if col_name in ['Model', 'VC Number'] else 'center', vertical='center')
                         
                         if 'Shortage' in col_name and isinstance(val, (int, float)) and val < 0:
                             cell.fill = PatternFill(start_color='FFD1D1', end_color='FFD1D1', fill_type='solid')
@@ -4548,37 +5448,74 @@ with tcf_tabs[0]:
                     col_letter = openpyxl.utils.get_column_letter(col[0].column)
                     ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
 
-            format_openpyxl_shortage_sheet('Cockpit Shortage', df_cpt_shortage, 'Cockpit Part Number')
+            format_openpyxl_shortage_sheet('Cockpit WH Shortage', df_cpt_shortage, 'Cockpit WH Part Number')
             format_openpyxl_shortage_sheet('Wiring Shortage', df_wir_shortage, 'Wiring Part Number')
+            
+            # Sheet: Hourly Production (if available)
+            if hourly_df is not None and not hourly_df.empty:
+                try:
+                    df_export_hourly.to_excel(writer, index=False, sheet_name='Hourly Production')
+                    ws_h_comb = writer.sheets['Hourly Production']
+                    ws_h_comb.row_dimensions[1].height = 28
+                    
+                    fill_hdr_h = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
+                    fill_sub_vh = PatternFill(start_color='BDD7EE', end_color='BDD7EE', fill_type='solid')
+                    fill_sub_dh = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+                    
+                    for c_i in range(1, len(df_export_hourly.columns) + 1):
+                        c_cell = ws_h_comb.cell(row=1, column=c_i)
+                        c_cell.font = font_header
+                        c_cell.fill = fill_hdr_h
+                        c_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                        c_cell.border = thin_border
+                        
+                    for r_i in range(2, len(df_export_hourly) + 2):
+                        ws_h_comb.row_dimensions[r_i].height = 22
+                        pt_val = str(ws_h_comb.cell(row=r_i, column=1).value).strip().upper()
+                        is_tot_v = 'TOTAL VIN' in pt_val
+                        is_tot_d = 'TOTAL TCF DROP' in pt_val or 'TOTAL DROP' in pt_val
+                        
+                        for c_i in range(1, len(df_export_hourly.columns) + 1):
+                            cell_obj = ws_h_comb.cell(row=r_i, column=c_i)
+                            cell_obj.border = thin_border
+                            if c_i == 1:
+                                cell_obj.alignment = Alignment(horizontal='left', vertical='center')
+                            else:
+                                cell_obj.alignment = Alignment(horizontal='center', vertical='center')
+                                
+                            if is_tot_v:
+                                cell_obj.font = font_subtotal
+                                cell_obj.fill = fill_sub_vh
+                            elif is_tot_d:
+                                cell_obj.font = font_subtotal
+                                cell_obj.fill = fill_sub_dh
+                            else:
+                                cell_obj.font = font_normal
+                                
+                    for col in ws_h_comb.columns:
+                        m_len = max(len(str(cell.value or '')) for cell in col)
+                        c_let = openpyxl.utils.get_column_letter(col[0].column)
+                        ws_h_comb.column_dimensions[c_let].width = max(m_len + 4, 14)
+                except Exception as ex_h:
+                    print(f"Error adding Hourly Production to summary export: {ex_h}")
                 
         excel_data = excel_buffer.getvalue()
 
-        # Build 2-Sheet Excel workbook for Cockpit & Wiring Report (All Parts: Cockpit, Wiring)
+        # Build 2-Sheet Excel workbook for Cockpit WH & Wiring Report (All Parts: Cockpit WH, Wiring)
         all_parts_excel_buffer = io.BytesIO()
         with pd.ExcelWriter(all_parts_excel_buffer, engine='openpyxl') as writer_all:
-            format_openpyxl_shortage_sheet('Cockpit', df_cpt_all, 'Cockpit Part Number', target_writer=writer_all)
+            format_openpyxl_shortage_sheet('Cockpit WH', df_cpt_all, 'Cockpit WH Part Number', target_writer=writer_all)
             format_openpyxl_shortage_sheet('Wiring', df_wir_all, 'Wiring Part Number', target_writer=writer_all)
         all_parts_excel_data = all_parts_excel_buffer.getvalue()
         
         st.markdown("---")
-        col_exp1, col_exp2 = st.columns(2)
-        with col_exp1:
-            st.download_button(
-                label="📥 Export Summary Reports to Excel",
-                data=excel_data,
-                file_name="paint_shop_float_and_requirements_summary.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="export_summary_report"
-            )
-        with col_exp2:
-            st.download_button(
-                label="📥 Download Cockpit & Wiring Report (All Parts - 2 Sheets)",
-                data=all_parts_excel_data,
-                file_name="Cockpit_and_Wiring_Report_All_Parts.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="export_cockpit_wiring_all_parts"
-            )
-
+        st.download_button(
+            label="📥 Export Master Summary Reports to Excel",
+            data=excel_data,
+            file_name="paint_shop_float_and_requirements_summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_summary_report"
+        )
 
         # --- FINAL REMARK: BOM COMPLETENESS ALERT & QUICK-ENTRY ---
         st.markdown("---")
@@ -4598,7 +5535,7 @@ with tcf_tabs[0]:
                     with fb1:
                         in_engine = st.text_input("Engine / Battery Part No.")
                     with fb2:
-                        in_cockpit = st.text_input("Cockpit Part No.")
+                        in_cockpit = st.text_input("Cockpit WH Part No.")
                     with fb3:
                         in_wiring = st.text_input("Front Wiring Part No.")
                     submitted = st.form_submit_button("💾 Save BOM Entry")
@@ -4614,7 +5551,191 @@ with tcf_tabs[0]:
                             except Exception as e:
                                 st.error(f"Could not save BOM entry: {e}")
         elif 'missing_bom_df' in locals() and missing_bom_df.empty and bom_df is not None and not bom_df.empty:
-
             st.success("✅ All BOM data checked — no error found. Every Short VC in the current float has a complete BOM match.")
     else:
         st.info("Please load Paint Float data in the Control Panel to view the summary report.")
+
+
+# ----------------- TAB 2: COCKPIT & WIRING SHORTAGE REPORTS -----------------
+with tcf_tabs[1]:
+    st.markdown("### 🧩 Cockpit WH & Wiring Shortage Reports")
+    st.markdown("""
+        Real-time shortage monitoring for **Cockpit WH Assemblies** and **Front Wiring Harnesses** matching engine summary models across TCF1 and TCF2 lines.
+    """)
+
+    cpt_sh_df = df_cpt_shortage if 'df_cpt_shortage' in locals() and df_cpt_shortage is not None else pd.DataFrame()
+    wir_sh_df = df_wir_shortage if 'df_wir_shortage' in locals() and df_wir_shortage is not None else pd.DataFrame()
+    cpt_all_df = df_cpt_all if 'df_cpt_all' in locals() and df_cpt_all is not None else pd.DataFrame()
+    wir_all_df = df_wir_all if 'df_wir_all' in locals() and df_wir_all is not None else pd.DataFrame()
+
+    if (cpt_all_df is None or cpt_all_df.empty) and (wir_all_df is None or wir_all_df.empty):
+        st.info("ℹ️ Please load Paint Float and BOM data in the Control Panel to view Cockpit WH & Wiring Shortage Reports.")
+    else:
+        # Top KPI Summary Cards
+        cpt_sh_count = len(cpt_sh_df) if cpt_sh_df is not None else 0
+        wir_sh_count = len(wir_sh_df) if wir_sh_df is not None else 0
+        tot_cpt_count = len(cpt_all_df) if cpt_all_df is not None else 0
+        tot_wir_count = len(wir_all_df) if wir_all_df is not None else 0
+
+        kpi_sh1, kpi_sh2, kpi_sh3, kpi_sh4 = st.columns(4)
+        with kpi_sh1:
+            st.metric(
+                label="🚗 Cockpit WH Shortages",
+                value=f"{cpt_sh_count} Part{'s' if cpt_sh_count != 1 else ''}",
+                delta="Critical Shortage" if cpt_sh_count > 0 else "All Covered",
+                delta_color="inverse" if cpt_sh_count > 0 else "normal"
+            )
+        with kpi_sh2:
+            st.metric(
+                label="⚡ Wiring Shortages",
+                value=f"{wir_sh_count} Part{'s' if wir_sh_count != 1 else ''}",
+                delta="Critical Shortage" if wir_sh_count > 0 else "All Covered",
+                delta_color="inverse" if wir_sh_count > 0 else "normal"
+            )
+        with kpi_sh3:
+            st.metric(
+                label="📦 Monitored Cockpit WH",
+                value=f"{tot_cpt_count} Part Numbers"
+            )
+        with kpi_sh4:
+            st.metric(
+                label="🔌 Monitored Wiring",
+                value=f"{tot_wir_count} Part Numbers"
+            )
+
+        # Excess Alert Banner (if any)
+        if 'excess_alerts' in locals() and excess_alerts:
+            header_title = f"🚨 ALERT: TODAY VIN GENERATION EXCEEDS CLEARANCE AFTER 6:30 AM ({len(excess_alerts)} Item{'s' if len(excess_alerts) > 1 else ''})"
+            bg_card = '#2C121A' if is_dark_theme else '#FFF1F2'
+            title_color = '#FDA4AF' if is_dark_theme else '#9F1239'
+            sub_color = '#94A3B8' if is_dark_theme else '#64748B'
+            text_col = '#FAFAFA' if is_dark_theme else '#111827'
+            th_bg = '#4C1D24' if is_dark_theme else '#FFE4E6'
+            border_hdr = '#881337' if is_dark_theme else '#FECDD3'
+            border_td = '#5F1D28' if is_dark_theme else '#FFE4E6'
+            cat_col = '#FB7185' if is_dark_theme else '#E11D48'
+            vin_col = '#F43F5E' if is_dark_theme else '#BE123C'
+            exc_bg = '#881337' if is_dark_theme else '#FECDD3'
+            exc_col = '#FFF' if is_dark_theme else '#9F1239'
+            
+            rows_html = ""
+            for a in excess_alerts:
+                rows_html += (
+                    f"<tr>"
+                    f"<td style='padding: 7px 8px; border: 1px solid {border_td}; font-weight: 600; color: {cat_col};'>{a['Category']}</td>"
+                    f"<td style='padding: 7px 8px; border: 1px solid {border_td};'>{a['Model / Part']}</td>"
+                    f"<td style='padding: 7px 8px; border: 1px solid {border_td}; text-align: center;'>{a['Clearance 6:30 AM']}</td>"
+                    f"<td style='padding: 7px 8px; border: 1px solid {border_td}; text-align: center; font-weight: bold; color: {vin_col};'>{a['Today VIN']}</td>"
+                    f"<td style='padding: 7px 8px; border: 1px solid {border_td}; text-align: center; font-weight: bold; background-color: {exc_bg}; color: {exc_col};'>+{a['Excess Qty']}</td>"
+                    f"</tr>"
+                )
+                
+            alert_box_html = (
+                f"<div style='border: 2px solid #E11D48; border-radius: 10px; background-color: {bg_card}; padding: 14px; margin-top: 15px; margin-bottom: 20px;'>"
+                f"<div style='font-weight: 700; font-size: 15px; color: {title_color}; margin-bottom: 6px;'>{header_title}</div>"
+                f"<div style='font-size: 12px; color: {sub_color}; margin-bottom: 10px;'>The following parts / aggregates have Today VIN quantity exceeding the 6:30 AM Clearance quantity:</div>"
+                f"<table style='width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 12px; color: {text_col};'>"
+                f"<thead>"
+                f"<tr style='background-color: {th_bg}; text-align: left;'>"
+                f"<th style='padding: 8px; border: 1px solid {border_hdr};'>Category</th>"
+                f"<th style='padding: 8px; border: 1px solid {border_hdr};'>Model / Part Description</th>"
+                f"<th style='padding: 8px; border: 1px solid {border_hdr}; text-align: center;'>Clearance After 6:30AM</th>"
+                f"<th style='padding: 8px; border: 1px solid {border_hdr}; text-align: center;'>Today VIN</th>"
+                f"<th style='padding: 8px; border: 1px solid {border_hdr}; text-align: center;'>Excess VIN Qty</th>"
+                f"</tr>"
+                f"</thead>"
+                f"<tbody>{rows_html}</tbody>"
+                f"</table>"
+                f"</div>"
+            )
+            st.markdown(alert_box_html, unsafe_allow_html=True)
+
+        # Filters: View Mode, Line, Search
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        f_col1, f_col2, f_col3 = st.columns([1.5, 1.2, 1.3])
+        with f_col1:
+            sh_view_mode = st.radio(
+                "📋 Display Filter:",
+                ["🚨 Critical Shortages Only", "📋 All Parts & Current Stock"],
+                horizontal=True,
+                key="sh_tab_view_mode"
+            )
+        with f_col2:
+            sh_line_filter = st.selectbox(
+                "🏭 Filter by TCF Line:",
+                ["All Lines (TCF1 + TCF2)", "TCF1 Line", "TCF2 Line"],
+                key="sh_tab_line_filter"
+            )
+        with f_col3:
+            sh_search = st.text_input(
+                "🔍 Search Part / Model:",
+                placeholder="Search part number or model...",
+                key="sh_tab_search"
+            )
+
+        show_shortages_only = (sh_view_mode == "🚨 Critical Shortages Only")
+        target_cpt = cpt_sh_df if show_shortages_only else cpt_all_df
+        target_wir = wir_sh_df if show_shortages_only else wir_all_df
+
+        def _apply_sh_filters(df_in, part_hdr):
+            if df_in is None or df_in.empty:
+                return df_in
+            df_out = df_in.copy()
+            if sh_line_filter == "TCF1 Line":
+                df_out = df_out[df_out['LINE'] == 'TCF1']
+            elif sh_line_filter == "TCF2 Line":
+                df_out = df_out[df_out['LINE'] == 'TCF2']
+            if sh_search.strip():
+                q = sh_search.strip().lower()
+                df_out = df_out[
+                    df_out[part_hdr].astype(str).str.lower().str.contains(q) |
+                    df_out['Model'].astype(str).str.lower().str.contains(q) |
+                    df_out['VC Number'].astype(str).str.lower().str.contains(q)
+                ]
+            return df_out
+
+        filtered_cpt = _apply_sh_filters(target_cpt, "Cockpit WH Part Number")
+        filtered_wir = _apply_sh_filters(target_wir, "Wiring Part Number")
+
+        st.markdown("---")
+        st.markdown("#### 🚗 Cockpit WH Shortage Report")
+        if filtered_cpt is not None and not filtered_cpt.empty:
+            st.markdown(render_html_formatted_shortage(filtered_cpt, "Cockpit WH Part Number", is_dark_theme), unsafe_allow_html=True)
+        else:
+            if show_shortages_only:
+                st.success("✅ No Cockpit WH Shortages detected for selected filters! All required cockpit WH assemblies are covered by clearance stock.")
+            else:
+                st.info("No cockpit WH records match your filters.")
+
+        st.markdown("#### ⚡ Wiring Harness Shortage Report")
+        if filtered_wir is not None and not filtered_wir.empty:
+            st.markdown(render_html_formatted_shortage(filtered_wir, "Wiring Part Number", is_dark_theme), unsafe_allow_html=True)
+        else:
+            if show_shortages_only:
+                st.success("✅ No Wiring Harness Shortages detected for selected filters! All required wiring harnesses are covered by clearance stock.")
+            else:
+                st.info("No wiring harness records match your filters.")
+
+        # Dedicated Export Section in Tab 1
+        st.markdown("---")
+        exp_sh1, exp_sh2 = st.columns(2)
+        with exp_sh1:
+            st.download_button(
+                label="📥 Download Cockpit WH & Wiring Report (All Parts - 2 Sheets)",
+                data=all_parts_excel_data,
+                file_name="Cockpit_WH_and_Wiring_Report_All_Parts.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="export_cockpit_wiring_tab_all_parts"
+            )
+        with exp_sh2:
+            sh_excel_buf = io.BytesIO()
+            with pd.ExcelWriter(sh_excel_buf, engine='openpyxl') as writer_sh_only:
+                format_openpyxl_shortage_sheet('Cockpit WH Shortage', cpt_sh_df, 'Cockpit WH Part Number', target_writer=writer_sh_only)
+                format_openpyxl_shortage_sheet('Wiring Shortage', wir_sh_df, 'Wiring Part Number', target_writer=writer_sh_only)
+            st.download_button(
+                label="📥 Download Critical Shortages Only (Excel)",
+                data=sh_excel_buf.getvalue(),
+                file_name="Cockpit_WH_and_Wiring_Critical_Shortages.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="export_cockpit_wiring_tab_critical_only"
+            )

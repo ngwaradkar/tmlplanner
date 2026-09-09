@@ -1,3 +1,6 @@
+# Environment and secrets
+.env
+
 # Python cache
 __pycache__/
 *.pyc
@@ -8,13 +11,18 @@ __pycache__/
 *.xlsx
 *.xls
 *.xlsb
+*.xlsm
 *.csv
 *.db
 
-# Force track Master BOM and TEST directory
+# Force track Master BOM, Dashboard files, and TEST directory
 !Bom details.xlsx
+!Dashboard files.xlsm
 !TEST/
 !TEST/*
+
+# Temporary & update scratch folders
+update/
 
 # Streamlit logs (but keep config.toml for theming)
 *.log
