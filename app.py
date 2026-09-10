@@ -1094,23 +1094,32 @@ default_bom_path = detected_files.get('BOM')
 default_float_path = detected_files.get('FLOAT_REPORT') or detected_files.get('FLOAT_PAINT_SUMMARY')
 default_core_available = (db_bom_exists or default_bom_path is not None) and default_float_path is not None
 
-# Anchor + one-shot scroll for the sidebar's "Control Panel" Quick Navigation
-# button (added below, near tcf_tabs). Control Panel lives outside the tabs,
-# so it can't use the tab key/on_change mechanism -- a plain same-page anchor
-# scroll is the reliable way to jump to it instead.
-st.markdown('<div id="control-panel-section"></div>', unsafe_allow_html=True)
-if st.session_state.get('_jump_to_control_panel'):
-    st.iframe(
-        "<script>window.parent.document.getElementById('control-panel-section')"
-        ".scrollIntoView({behavior: 'smooth', block: 'start'});</script>",
-        height=1
-    )
-    st.session_state['_jump_to_control_panel'] = False
-
-config_expander = st.expander(
-    "⚙️ Control Panel: File Uploads & Engine Starting Stocks (Click to Expand/Collapse)",
-    expanded=(not default_core_available and not st.session_state.get('run_report', False)) or st.session_state.get('_control_panel_force_open', False)
+_control_panel_should_show = (
+    st.session_state.get('_show_control_panel_page', False)
+    or not default_core_available
+    or not st.session_state.get('run_report', False)
 )
+# Hide/show is pure CSS (scoped via the st-key-<key> class Streamlit
+# generates for a keyed container) rather than skipping the Python code --
+# that keeps every widget's state intact regardless of which page is
+# currently shown, instead of risking upload/input state resetting each
+# time a section is toggled off and back on.
+if _control_panel_should_show:
+    st.markdown(
+        "<style>.st-key-active_tcf_tab, .st-key-shortage_alerts_banner { display: none !important; }</style>",
+        unsafe_allow_html=True
+    )
+else:
+    st.markdown(
+        "<style>.st-key-control_panel_page, .st-key-generate_report_section { display: none !important; }</style>",
+        unsafe_allow_html=True
+    )
+
+with st.container(key="control_panel_page"):
+    config_expander = st.expander(
+        "⚙️ Control Panel: File Uploads & Engine Starting Stocks (Click to Expand/Collapse)",
+        expanded=(not default_core_available and not st.session_state.get('run_report', False)) or _control_panel_should_show
+    )
 
 with config_expander:
     col_upload, col_engine, col_extras = st.columns([1.1, 1.1, 1.0])
@@ -1636,19 +1645,20 @@ if not core_available:
 if 'run_report' not in st.session_state:
     st.session_state.run_report = False
 
-st.markdown("---")
-col_gen1, col_gen2 = st.columns([1.5, 3.5])
-with col_gen1:
-    btn_label = "🚀 Generate Report" if not st.session_state.run_report else "🔄 Update Dashboard Data"
-    if st.button(btn_label, type="primary", use_container_width=True, key="btn_generate_report_control"):
-        st.session_state.run_report = True
-        st.rerun()
+with st.container(key="generate_report_section"):
+    st.markdown("---")
+    col_gen1, col_gen2 = st.columns([1.5, 3.5])
+    with col_gen1:
+        btn_label = "🚀 Generate Report" if not st.session_state.run_report else "🔄 Update Dashboard Data"
+        if st.button(btn_label, type="primary", use_container_width=True, key="btn_generate_report_control"):
+            st.session_state.run_report = True
+            st.rerun()
 
-with col_gen2:
-    if not st.session_state.run_report:
-        st.info("💡 Files or engine data have been updated. Click **'🚀 Generate Report'** on the left to run calculations.")
-    else:
-        st.caption("✅ Report is generated. Uploading new files or updating engine clearances will pause auto-runs until you click **'Update Dashboard Data'**.")
+    with col_gen2:
+        if not st.session_state.run_report:
+            st.info("💡 Files or engine data have been updated. Click **'🚀 Generate Report'** on the left to run calculations.")
+        else:
+            st.caption("✅ Report is generated. Uploading new files or updating engine clearances will pause auto-runs until you click **'Update Dashboard Data'**.")
 
 if not st.session_state.run_report:
     st.stop()
@@ -2372,18 +2382,19 @@ active_clearance_shortage_alerts = evaluate_all_clearance_shortage_alerts(
 )
 
 if active_clearance_shortage_alerts:
-    alert_box_html = f"""
-    <div style="background-color: #FEF2F2; border: 1.5px solid #EF4444; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px;">
-        <div style="font-weight: 700; font-size: 15px; color: #991B1B; display: flex; align-items: center; gap: 8px;">
-            <span style="font-size: 18px;">🚨</span>
-            <span>MATERIAL SHORTAGE ALERTS TRIGGERED ({len(active_clearance_shortage_alerts)} Critical Shortage Item{'s' if len(active_clearance_shortage_alerts)>1 else ''})</span>
-        </div>
-        <div style="font-size: 13px; color: #7F1D1D; margin-top: 8px; line-height: 1.6;">
-    """
-    for al in active_clearance_shortage_alerts:
-        alert_box_html += f"• <b>{al['Model']} [{al['Trims']}] - {al['Part Name']}</b>: Clearance Stock is <b>{al['Clearance Qty']}</b> vs Demand <b>{al['Demand Qty']}</b> (<span style='color:#DC2626; font-weight:700;'>Shortage: -{al['Shortage Qty']} units</span>)<br>"
-    alert_box_html += "</div></div>"
-    st.markdown(alert_box_html, unsafe_allow_html=True)
+    with st.container(key="shortage_alerts_banner"):
+        alert_box_html = f"""
+        <div style="background-color: #FEF2F2; border: 1.5px solid #EF4444; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px;">
+            <div style="font-weight: 700; font-size: 15px; color: #991B1B; display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 18px;">🚨</span>
+                <span>MATERIAL SHORTAGE ALERTS TRIGGERED ({len(active_clearance_shortage_alerts)} Critical Shortage Item{'s' if len(active_clearance_shortage_alerts)>1 else ''})</span>
+            </div>
+            <div style="font-size: 13px; color: #7F1D1D; margin-top: 8px; line-height: 1.6;">
+        """
+        for al in active_clearance_shortage_alerts:
+            alert_box_html += f"• <b>{al['Model']} [{al['Trims']}] - {al['Part Name']}</b>: Clearance Stock is <b>{al['Clearance Qty']}</b> vs Demand <b>{al['Demand Qty']}</b> (<span style='color:#DC2626; font-weight:700;'>Shortage: -{al['Shortage Qty']} units</span>)<br>"
+        alert_box_html += "</div></div>"
+        st.markdown(alert_box_html, unsafe_allow_html=True)
 
 # Toggle between TCF1, TCF2, Total Float Details, Combined Summary & Reports (Opening tab: Summary Report & Excel Download)
 # Kept as one list (instead of inlining into st.tabs) so the sidebar's Quick
@@ -2410,23 +2421,23 @@ _tcf_tab_nav_short = [
 
 def _sidebar_go_to_tab(label):
     st.session_state["active_tcf_tab"] = label
+    st.session_state['_show_control_panel_page'] = False
 
 def _sidebar_go_to_control_panel():
-    st.session_state['_jump_to_control_panel'] = True
-    st.session_state['_control_panel_force_open'] = True
+    st.session_state['_show_control_panel_page'] = True
 
 # ----------------- SIDEBAR: Quick Navigation -----------------
 st.sidebar.markdown("---")
 st.sidebar.markdown("#### 🧭 Quick Navigation")
 
 # Control Panel lives outside the tabs (it's the file-upload/stock-entry
-# section at the top of the main body), so it's a separate button from
-# Summary Report -- a plain anchor-scroll rather than the tab key/on_change
-# mechanism the other buttons below use.
+# section at the top of the main body) and is now an exclusive "page" of
+# its own -- selecting it hides the tabs/alerts, selecting any tab below
+# hides it, via the CSS toggle set up earlier (_control_panel_should_show).
 st.sidebar.button(
     "⚙️ Control Panel",
     width="stretch",
-    type="secondary",
+    type="primary" if _control_panel_should_show else "secondary",
     key="nav_btn_control_panel",
     on_click=_sidebar_go_to_control_panel
 )
@@ -2436,7 +2447,7 @@ for _full_label, _short_label in zip(_tcf_tab_labels, _tcf_tab_nav_short):
     st.sidebar.button(
         _short_label,
         width="stretch",
-        type="primary" if _full_label == _current_tab else "secondary",
+        type="primary" if (_full_label == _current_tab and not _control_panel_should_show) else "secondary",
         key=f"nav_btn_{_full_label}",
         on_click=_sidebar_go_to_tab,
         args=(_full_label,)
