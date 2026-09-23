@@ -1,44 +1,12 @@
 import pandas as pd
 import numpy as np
-import streamlit as st
 
-# Cache TTL for the heavy allocation/shortage computations below: long enough
-# that clicking around the dashboard (tab switches, filters, the 60s Telegram
-# auto-send refresh, the 5-min OneDrive auto-sync refresh) doesn't re-run the
-# full FIFO allocation / shortage engine on unchanged data, short enough to
-# self-heal if a cache entry is ever wrong. Mirrors data_loader.py's TTL.
-_CACHE_TTL_SECONDS = 1800
+def _bom_lookup(bom):
+    if bom is None or bom.empty:
+        return {}
+    return {row['Short Vehicle Code']: row for row in
+            bom.drop_duplicates('Short Vehicle Code', keep='first').to_dict('records')}
 
-
-def _build_bom_lookup(bom):
-    """
-    Indexes the BOM DataFrame by Short Vehicle Code ONCE, as a plain dict of
-    {short_vc: row_dict}.
-
-    Every function below used to do `bom[bom['Short Vehicle Code'] == short_vc]`
-    *inside* a per-cab loop -- an O(cabs_in_queue x rows_in_bom) DataFrame
-    filter, repeated for every single cab/VIN. On a ~1000-row float report
-    against a ~300-row BOM that's ~300,000 pandas comparisons (plus the
-    overhead of building a new boolean mask + Series each time) just to look
-    up parts for one allocation run -- and it ran 10+ times per Streamlit
-    rerun. Building this dict once turns every one of those lookups into an
-    O(1) dict access instead.
-
-    Keeps the FIRST row seen per Short VC, matching the original code's
-    `.iloc[0]` on the filtered subset (the master BOM has no duplicate Short
-    Vehicle Codes in practice, so this is a no-op distinction either way).
-    """
-    lookup = {}
-    if bom is None or bom.empty or 'Short Vehicle Code' not in bom.columns:
-        return lookup
-    for rec in bom.to_dict('records'):
-        key = str(rec.get('Short Vehicle Code')).strip()
-        if key not in lookup:
-            lookup[key] = rec
-    return lookup
-
-
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS)
 def calculate_true_stock(shift_start_stock, tcf_drops, bom, bom_part_col):
     """
     Computes True Current Stock = Shift Start Stock - Consumed Parts.
@@ -52,6 +20,9 @@ def calculate_true_stock(shift_start_stock, tcf_drops, bom, bom_part_col):
       - consumed: dict of {part_number: consumed_qty}
       - warnings: list of strings (e.g. part number went negative)
     """
+    if shift_start_stock is None:
+        return None, {}, ['Stock file not loaded.']
+    lookup = _bom_lookup(bom)
     true_stock = shift_start_stock.copy()
     consumed = {part: 0 for part in shift_start_stock}
     warnings = []
@@ -59,20 +30,18 @@ def calculate_true_stock(shift_start_stock, tcf_drops, bom, bom_part_col):
     # If no tcf_drops or bom, true_stock is just shift_start_stock
     if tcf_drops is None or tcf_drops.empty or bom is None or bom.empty:
         return true_stock, consumed, warnings
-
-    bom_lookup = _build_bom_lookup(bom)
-
-    for row in tcf_drops.to_dict('records'):
+        
+    for idx, row in tcf_drops.iterrows():
         full_vc = row.get('VEHICLE CODE') if pd.notna(row.get('VEHICLE CODE')) else row.get('VC')
         if pd.isna(full_vc) or not full_vc:
             continue
         short_vc = str(full_vc).strip()[:9]
-
-        # Look up in BOM (O(1) dict lookup instead of a per-row DataFrame filter)
-        bom_entry = bom_lookup.get(short_vc)
+        
+        # Look up in BOM
+        bom_entry = lookup.get(short_vc)
         if bom_entry is None:
             continue
-
+            
         part_no = bom_entry.get(bom_part_col)
         if not part_no or str(part_no).strip() in ['0', 'None', 'nan']:
             continue
@@ -128,7 +97,6 @@ def _is_model_trim_matched(cab_model, cab_sales_desc, target_model, target_trims
     return False
 
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS)
 def run_allocation(pbs_queue, bom, true_engine, true_cockpit, true_wiring, true_nova=None, model_shortages=None):
     """
     Runs the FIFO allocation loop for PBS cabs.
@@ -144,6 +112,7 @@ def run_allocation(pbs_queue, bom, true_engine, true_cockpit, true_wiring, true_
       - results: list of dicts representing allocated cabs
       - final_stocks: dict containing final virtual stocks
     """
+    lookup = _bom_lookup(bom)
     # Create working copies of stock pools
     virt_engine = true_engine.copy() if true_engine is not None else None
     virt_cockpit = true_cockpit.copy() if true_cockpit is not None else None
@@ -162,14 +131,9 @@ def run_allocation(pbs_queue, bom, true_engine, true_cockpit, true_wiring, true_
             'nova': virt_nova,
             'model_shortages': virt_model_shortages
         }
-
-    # Index the BOM by Short Vehicle Code ONCE instead of re-filtering the
-    # whole BOM DataFrame for every cab in the queue (see _build_bom_lookup).
-    bom_lookup = _build_bom_lookup(bom)
-
-    # Process cabs in FIFO order (to_dict('records') is a plain list of dicts,
-    # which is materially faster to iterate than DataFrame.iterrows()).
-    for row in pbs_queue.to_dict('records'):
+        
+    # Process cabs in FIFO order
+    for idx, row in pbs_queue.iterrows():
         biw_num = row.get('BIW NUMBER')
         vin = row.get('VIN')
         full_vc = row.get('VEHICLE CODE') if pd.notna(row.get('VEHICLE CODE')) else row.get('VC')
@@ -181,8 +145,8 @@ def run_allocation(pbs_queue, bom, true_engine, true_cockpit, true_wiring, true_
         
         short_vc = str(full_vc).strip()[:9]
         
-        # BOM Lookup (O(1) dict lookup instead of a per-row DataFrame filter)
-        bom_entry = bom_lookup.get(short_vc)
+        # BOM Lookup
+        bom_entry = lookup.get(short_vc)
         
         if bom_entry is None:
             results.append({
@@ -356,33 +320,38 @@ def run_allocation(pbs_queue, bom, true_engine, true_cockpit, true_wiring, true_
         'wiring': virt_wiring
     }
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS)
 def get_paint_float_stages(df_float):
     """
     Classifies each cab in the float report into its current stage in the paint flow.
     Flow order: BIW LIFTING -> PTCED -> SEALANT -> TOPCOAT -> PBS LIFT (closest to TCF)
-
-    Vectorized with np.select instead of a per-row Python loop -- same
-    closest-to-PBS-first priority order as before, applied to the whole
-    column at once rather than row by row.
     """
+    stages = []
+    
+    for idx, row in df_float.iterrows():
+        biw_lift = row.get('BIW LIFTING')
+        ptced = row.get('PTCED')
+        sealant = row.get('SEALANT')
+        topcoat = row.get('TOPCOAT')
+        pbs_lift = row.get('PBS LIFT')
+        
+        # Ordered classification (check closest to PBS first)
+        if pd.notna(pbs_lift):
+            stage = '1. PBS LIFT'
+        elif pd.notna(topcoat):
+            stage = '2. TOPCOAT'
+        elif pd.notna(sealant):
+            stage = '3. SEALANT'
+        elif pd.notna(ptced):
+            stage = '4. PTCED'
+        elif pd.notna(biw_lift):
+            stage = '5. BIW LIFTING'
+        else:
+            stage = '6. UNKNOWN'
+            
+        stages.append(stage)
+        
     df_with_stage = df_float.copy()
-
-    def _notna_col(col):
-        if col in df_with_stage.columns:
-            return df_with_stage[col].notna().to_numpy()
-        return np.zeros(len(df_with_stage), dtype=bool)
-
-    conditions = [
-        _notna_col('PBS LIFT'),
-        _notna_col('TOPCOAT'),
-        _notna_col('SEALANT'),
-        _notna_col('PTCED'),
-        _notna_col('BIW LIFTING'),
-    ]
-    choices = ['1. PBS LIFT', '2. TOPCOAT', '3. SEALANT', '4. PTCED', '5. BIW LIFTING']
-
-    df_with_stage['Paint_Stage'] = np.select(conditions, choices, default='6. UNKNOWN')
+    df_with_stage['Paint_Stage'] = stages
     return df_with_stage
 
 def get_detailed_paint_summary_stage(row):
@@ -431,7 +400,6 @@ def get_detailed_paint_summary_stage(row):
     else:
         return 'PT BYPASS'
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS)
 def calculate_stagewise_shortage(df_float_stages, bom, true_stocks):
     """
     Computes material requirements and shortages for each stage of the paint float.
@@ -442,15 +410,14 @@ def calculate_stagewise_shortage(df_float_stages, bom, true_stocks):
     Returns:
       - shortage_report: DataFrame with columns: Stage, TCF Line, Aggregate Type, Part Number, Demand in Stage, Cumulative Demand, True Stock, Net Balance, Status
     """
+    lookup = _bom_lookup(bom)
     # Sort order of stages (from closest to TCF to furthest)
     stage_order = ['1. PBS LIFT', '2. TOPCOAT', '3. SEALANT', '4. PTCED', '5. BIW LIFTING']
     
     # Accumulate demand per (stage, agg_type, part_number, shop)
     demand_counts = {}
-
-    bom_lookup = _build_bom_lookup(bom)
-
-    for row in df_float_stages.to_dict('records'):
+    
+    for idx, row in df_float_stages.iterrows():
         stage = row['Paint_Stage']
         if stage not in stage_order:
             continue
@@ -464,10 +431,11 @@ def calculate_stagewise_shortage(df_float_stages, bom, true_stocks):
         full_vc = row.get('VEHICLE CODE') if pd.notna(row.get('VEHICLE CODE')) else row.get('VC')
         short_vc = str(full_vc).strip()[:9] if pd.notna(full_vc) else ''
         
-        # Look up in BOM (O(1) dict lookup instead of a per-row DataFrame filter)
-        bom_entry = bom_lookup.get(short_vc)
+        # Look up in BOM
+        bom_entry = lookup.get(short_vc)
         if bom_entry is None:
             continue
+            
         
         parts = {
             'Engine': str(bom_entry.get('Engine')).strip() if bom_entry.get('Engine') else None,
@@ -536,7 +504,6 @@ def calculate_stagewise_shortage(df_float_stages, bom, true_stocks):
     return pd.DataFrame(report_rows)
 
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS)
 def find_missing_bom_vcs(df_float, bom):
     """
     Scans every cab currently in the float report and flags Short Vehicle Codes
@@ -559,7 +526,9 @@ def find_missing_bom_vcs(df_float, bom):
         # (Control Panel shows BOM as missing); don't duplicate that here.
         return pd.DataFrame()
 
-    bom_lookup = _build_bom_lookup(bom)
+    bom_lookup = {}
+    for _, r in bom.iterrows():
+        bom_lookup[str(r.get('Short Vehicle Code')).strip()] = r
 
     def _blank(v):
         if v is None:
@@ -568,7 +537,7 @@ def find_missing_bom_vcs(df_float, bom):
         return s == '' or s in ('0', 'None', 'nan')
 
     found = {}
-    for row in df_float.to_dict('records'):
+    for _, row in df_float.iterrows():
         full_vc = row.get('VEHICLE CODE') if pd.notna(row.get('VEHICLE CODE')) else row.get('VC')
         if pd.isna(full_vc) or not str(full_vc).strip():
             continue
@@ -604,3 +573,4 @@ def find_missing_bom_vcs(df_float, bom):
     if not found:
         return pd.DataFrame()
     return pd.DataFrame(list(found.values())).sort_values('Cab Count', ascending=False).reset_index(drop=True)
+

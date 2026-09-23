@@ -1,0 +1,299 @@
+[
+  {
+    "test": "Page: Overview",
+    "status": "PASS",
+    "seconds": 0.277,
+    "details": 3
+  },
+  {
+    "test": "Page: Summary & Excel Reports",
+    "status": "PASS",
+    "seconds": 0.497,
+    "details": 1
+  },
+  {
+    "test": "Export: prepare_export_prod_matrix_btn",
+    "status": "PASS",
+    "seconds": 0.431,
+    "details": {
+      "sheets": [
+        "Production Matrix"
+      ],
+      "bytes": 5317
+    }
+  },
+  {
+    "test": "Export: prepare_export_hourly_prod_btn",
+    "status": "PASS",
+    "seconds": 0.346,
+    "details": {
+      "sheets": [
+        "Hourly Production"
+      ],
+      "bytes": 5951
+    }
+  },
+  {
+    "test": "Export: prepare_export_summary_report",
+    "status": "PASS",
+    "seconds": 0.432,
+    "details": {
+      "sheets": [
+        "Summary Report",
+        "Engine & Battery Requirement",
+        "Cockpit WH Shortage",
+        "Wiring Shortage",
+        "Hourly Production"
+      ],
+      "bytes": 16504
+    }
+  },
+  {
+    "test": "Page: Cockpit & Wiring Shortages",
+    "status": "PASS",
+    "seconds": 0.269,
+    "details": 0
+  },
+  {
+    "test": "Export: prepare_export_cockpit_wiring_tab_all_parts",
+    "status": "PASS",
+    "seconds": 0.32,
+    "details": {
+      "sheets": [
+        "Cockpit WH",
+        "Wiring"
+      ],
+      "bytes": 16705
+    }
+  },
+  {
+    "test": "Export: prepare_export_cockpit_wiring_tab_critical_only",
+    "status": "PASS",
+    "seconds": 0.336,
+    "details": {
+      "sheets": [
+        "Cockpit WH Shortage",
+        "Wiring Shortage"
+      ],
+      "bytes": 11042
+    }
+  },
+  {
+    "test": "Page: TCF1 Line",
+    "status": "PASS",
+    "seconds": 0.294,
+    "details": 1
+  },
+  {
+    "test": "Export: prepare_dl_blocked_tcf1",
+    "status": "PASS",
+    "seconds": 0.33,
+    "details": {
+      "sheets": [
+        "Blocked TCF1"
+      ],
+      "bytes": 7263
+    }
+  },
+  {
+    "test": "Page: TCF2 Line",
+    "status": "PASS",
+    "seconds": 0.324,
+    "details": 1
+  },
+  {
+    "test": "Export: prepare_dl_blocked_tcf2",
+    "status": "PASS",
+    "seconds": 0.329,
+    "details": {
+      "sheets": [
+        "Blocked TCF2"
+      ],
+      "bytes": 6753
+    }
+  },
+  {
+    "test": "Page: Total Float & Search",
+    "status": "PASS",
+    "seconds": 0.319,
+    "details": 1
+  },
+  {
+    "test": "Export: prepare_export_float_details_All",
+    "status": "PASS",
+    "seconds": 2.75,
+    "details": {
+      "sheets": [
+        "Float Details",
+        "Ready to Upload Plan",
+        "Blocked Reason Pivot"
+      ],
+      "bytes": 100638
+    }
+  },
+  {
+    "test": "Page: Quality Holds",
+    "status": "PASS",
+    "seconds": 0.266,
+    "details": 2
+  },
+  {
+    "test": "Export: prepare_export_pbs_quality_holds",
+    "status": "PASS",
+    "seconds": 0.329,
+    "details": {
+      "sheets": [
+        "PBS Quality Holds"
+      ],
+      "bytes": 5514
+    }
+  },
+  {
+    "test": "Export: prepare_export_paintshop_quality_holds",
+    "status": "PASS",
+    "seconds": 0.298,
+    "details": {
+      "sheets": [
+        "Paint Shop Quality Holds"
+      ],
+      "bytes": 5793
+    }
+  },
+  {
+    "test": "Page: Control Panel",
+    "status": "PASS",
+    "seconds": 0.283,
+    "details": 2
+  },
+  {
+    "test": "Export: prepare_download_bom",
+    "status": "PASS",
+    "seconds": 0.334,
+    "details": {
+      "sheets": [
+        "BOM"
+      ],
+      "bytes": 12015
+    }
+  },
+  {
+    "test": "Page: Telegram Dispatcher",
+    "status": "PASS",
+    "seconds": 0.312,
+    "details": 0
+  },
+  {
+    "test": "Navigation reuses calculation",
+    "status": "PASS",
+    "seconds": 0.612,
+    "details": "Report timestamp unchanged"
+  },
+  {
+    "test": "Stock change invalidates calculation",
+    "status": "PASS",
+    "seconds": 0.541,
+    "details": "Input fingerprint changed and calculation reran"
+  },
+  {
+    "test": "Export: prepare_dl_ready_tcf1",
+    "status": "PASS",
+    "seconds": 0.315,
+    "details": {
+      "sheets": [
+        "Ready to TCF1",
+        "ready to upload"
+      ],
+      "bytes": 6766
+    }
+  },
+  {
+    "test": "Subview: TCF1 Line",
+    "status": "PASS",
+    "seconds": 0.299,
+    "details": "Float detail screen opens independently"
+  },
+  {
+    "test": "Export: prepare_dl_ready_tcf2",
+    "status": "PASS",
+    "seconds": 0.308,
+    "details": {
+      "sheets": [
+        "Ready to TCF2",
+        "ready to upload"
+      ],
+      "bytes": 6228
+    }
+  },
+  {
+    "test": "Subview: TCF2 Line",
+    "status": "PASS",
+    "seconds": 0.308,
+    "details": "Float detail screen opens independently"
+  },
+  {
+    "test": "Search/filter/export cache isolation",
+    "status": "PASS",
+    "seconds": 3.788,
+    "details": "Literal search works; export invalidated; calculation reused; filter persisted"
+  },
+  {
+    "test": "Stock forms and invalidation",
+    "status": "PASS",
+    "seconds": 0.862,
+    "details": "Both stock forms save and clear old snapshots"
+  },
+  {
+    "test": "Reset prevents stale snapshot reuse",
+    "status": "PASS",
+    "seconds": 1.125,
+    "details": "Zeroed stocks; report paused; stale snapshot removed"
+  },
+  {
+    "test": "Empty vehicle float",
+    "status": "PASS",
+    "seconds": 0.331,
+    "details": [
+      [
+        "VIN generated \u00b7 both lines",
+        "747"
+      ],
+      [
+        "PBS ready",
+        "0"
+      ],
+      [
+        "PBS material blocked",
+        "0"
+      ],
+      [
+        "PBS quality holds",
+        "0"
+      ],
+      [
+        "PBS BOM issues",
+        "0"
+      ]
+    ]
+  },
+  {
+    "test": "Concurrent Telegram claims (mocked)",
+    "status": "PASS",
+    "seconds": 0.006,
+    "details": [
+      "one",
+      "two",
+      "three"
+    ]
+  },
+  {
+    "test": "Partial Telegram failure retry (mocked)",
+    "status": "PASS",
+    "seconds": 0.004,
+    "details": [
+      "one",
+      "two",
+      "three",
+      "two"
+    ]
+  }
+]

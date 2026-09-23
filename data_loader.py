@@ -8,6 +8,66 @@ import pyxlsb
 import sqlite3
 import streamlit as st
 import requests
+import hashlib
+import functools
+import datetime
+from dataclasses import dataclass
+
+
+@dataclass
+class WorkbookSheet:
+    """Already-parsed master-workbook sheet, retaining a filename for existing loaders."""
+    frame: pd.DataFrame
+    name: str
+    content_id: str
+    def seek(self, position):
+        return 0
+    def __bool__(self):
+        return True
+
+
+def _read_excel(source, *args, **kwargs):
+    if isinstance(source, WorkbookSheet):
+        frame = source.frame.copy()
+        if kwargs.get('header', 0) is None:
+            return pd.DataFrame([list(frame.columns)] + frame.values.tolist())
+        return frame
+    try:
+        return pd.read_excel(source, *args, **kwargs)
+    except ValueError:
+        requested = kwargs.get('sheet_name')
+        if not isinstance(requested, str):
+            raise
+        if hasattr(source, 'seek'):
+            source.seek(0)
+        with pd.ExcelFile(source, engine=kwargs.get('engine')) as workbook:
+            matches = [name for name in workbook.sheet_names if name.strip().casefold() == requested.strip().casefold()]
+            if len(matches) != 1:
+                raise
+            options = dict(kwargs, sheet_name=matches[0])
+            options.pop('engine', None)
+            return pd.read_excel(workbook, *args, **options)
+
+
+def cached_file_loader(function):
+    @st.cache_data(show_spinner=False, max_entries=24, ttl=1800)
+    def cached(identity, _source, args, kwargs):
+        return function(_source, *args, **kwargs)
+    @functools.wraps(function)
+    def wrapped(source, *args, **kwargs):
+        if isinstance(source, WorkbookSheet):
+            identity = source.content_id
+        elif isinstance(source, str):
+            stat = os.stat(source) if os.path.exists(source) else None
+            identity = (source, stat.st_mtime_ns, stat.st_size) if stat else source
+        elif hasattr(source, 'getvalue'):
+            identity = (getattr(source, 'name', ''), hashlib.sha256(source.getvalue()).hexdigest())
+        else:
+            return function(source, *args, **kwargs)
+        return cached((function.__module__, function.__qualname__, identity), source, args, kwargs)
+    wrapped.clear = cached.clear
+    return wrapped
+
 
 def _hash_upload_buffer(b):
     """
@@ -53,6 +113,8 @@ def _detect_html_content(filepath_or_buffer):
     Returns (is_html: bool, html_content: str or None). Buffers are left at
     position 0 afterwards so downstream code can still read them.
     """
+    if isinstance(filepath_or_buffer, WorkbookSheet):
+        return False, None
     name = filepath_or_buffer if isinstance(filepath_or_buffer, str) else getattr(filepath_or_buffer, 'name', '')
     ext = os.path.splitext(str(name).lower())[1]
 
@@ -86,7 +148,7 @@ def _detect_html_content(filepath_or_buffer):
         return True, content
     return False, None
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS, hash_funcs={io.BytesIO: _hash_upload_buffer})
+@cached_file_loader
 def load_bom(filepath_or_buffer):
     """
     Loads BOM details.xlsx and returns a cleaned DataFrame.
@@ -98,7 +160,7 @@ def load_bom(filepath_or_buffer):
         except Exception:
             pass
     # openpyxl engine is used for .xlsx
-    df = pd.read_excel(filepath_or_buffer, engine='openpyxl')
+    df = _read_excel(filepath_or_buffer, engine='openpyxl')
     
     # Strip whitespace from headers
     df.columns = [str(c).strip() for c in df.columns]
@@ -128,7 +190,7 @@ def load_bom(filepath_or_buffer):
     df.drop_duplicates(subset=['Short Vehicle Code'], keep='first', inplace=True)
     return df
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS, hash_funcs={io.BytesIO: _hash_upload_buffer})
+@cached_file_loader
 def load_float_report(filepath_or_buffer):
     """
     Loads PPC Float Report (which can be .xlsb or .xls disguised HTML) and returns a cleaned DataFrame.
@@ -156,17 +218,17 @@ def load_float_report(filepath_or_buffer):
         if isinstance(filepath_or_buffer, str):
             ext = os.path.splitext(filepath_or_buffer.lower())[1]
             if ext == '.xlsb':
-                df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                df = _read_excel(filepath_or_buffer, engine='pyxlsb')
             else:
-                df = pd.read_excel(filepath_or_buffer)
+                df = _read_excel(filepath_or_buffer)
         else:
             # For stream or bytes, let's try to detect/read
             try:
-                df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                df = _read_excel(filepath_or_buffer, engine='pyxlsb')
             except Exception:
                 try:
                     filepath_or_buffer.seek(0)
-                    df = pd.read_excel(filepath_or_buffer)
+                    df = _read_excel(filepath_or_buffer)
                 except Exception:
                     try:
                         filepath_or_buffer.seek(0)
@@ -234,7 +296,7 @@ def load_float_report(filepath_or_buffer):
     
     return df_dedup
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS, hash_funcs={io.BytesIO: _hash_upload_buffer})
+@cached_file_loader
 def load_paint_summary_report(filepath_or_buffer):
     """
     Loads PPC Float Report Paint Summary (HTML or Excel format) and returns aggregated model stage totals.
@@ -257,16 +319,16 @@ def load_paint_summary_report(filepath_or_buffer):
         if isinstance(filepath_or_buffer, str):
             ext = os.path.splitext(filepath_or_buffer.lower())[1]
             if ext == '.xlsb':
-                df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                df = _read_excel(filepath_or_buffer, engine='pyxlsb')
             else:
-                df = pd.read_excel(filepath_or_buffer)
+                df = _read_excel(filepath_or_buffer)
         else:
             try:
-                df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                df = _read_excel(filepath_or_buffer, engine='pyxlsb')
             except Exception:
                 try:
                     filepath_or_buffer.seek(0)
-                    df = pd.read_excel(filepath_or_buffer)
+                    df = _read_excel(filepath_or_buffer)
                 except Exception:
                     try:
                         filepath_or_buffer.seek(0)
@@ -354,7 +416,7 @@ def load_paint_summary_report(filepath_or_buffer):
 
     return model_totals
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS, hash_funcs={io.BytesIO: _hash_upload_buffer})
+@cached_file_loader
 def load_vgl(filepath_or_buffer):
     """
     Loads Vehicle Generation List / DPT Plan VIN Generation Report (.xls, .xlsx, .xlsb, HTML).
@@ -437,24 +499,24 @@ def load_vgl(filepath_or_buffer):
         if isinstance(filepath_or_buffer, str):
             ext = os.path.splitext(filepath_or_buffer.lower())[1]
             if ext == '.xlsb':
-                df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                df = _read_excel(filepath_or_buffer, engine='pyxlsb')
             else:
-                df = pd.read_excel(filepath_or_buffer)
+                df = _read_excel(filepath_or_buffer)
         else:
             fname = getattr(filepath_or_buffer, 'name', '').lower()
             if fname.endswith('.xlsb'):
                 try:
-                    df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                    df = _read_excel(filepath_or_buffer, engine='pyxlsb')
                 except Exception:
                     filepath_or_buffer.seek(0)
-                    df = pd.read_excel(filepath_or_buffer)
+                    df = _read_excel(filepath_or_buffer)
             else:
                 try:
-                    df = pd.read_excel(filepath_or_buffer)
+                    df = _read_excel(filepath_or_buffer)
                 except Exception:
                     try:
                         filepath_or_buffer.seek(0)
-                        df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                        df = _read_excel(filepath_or_buffer, engine='pyxlsb')
                     except Exception:
                         filepath_or_buffer.seek(0)
                         dfs = pd.read_html(filepath_or_buffer)
@@ -570,7 +632,7 @@ def load_vgl(filepath_or_buffer):
     
     return df
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS, hash_funcs={io.BytesIO: _hash_upload_buffer})
+@cached_file_loader
 def load_stock_grouped(filepath_or_buffer, sheet_name, vc_col_idx, part_col_idx, qty_col_idx, skip_rows=2):
     """
     Generic grouped-row stock parser.
@@ -587,22 +649,22 @@ def load_stock_grouped(filepath_or_buffer, sheet_name, vc_col_idx, part_col_idx,
     if isinstance(filepath_or_buffer, str):
         ext = os.path.splitext(filepath_or_buffer.lower())[1]
         if ext == '.xlsb':
-            df = pd.read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='pyxlsb', header=None)
+            df = _read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='pyxlsb', header=None)
         else:
-            df = pd.read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='xlrd' if ext == '.xls' else 'openpyxl', header=None)
+            df = _read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='xlrd' if ext == '.xls' else 'openpyxl', header=None)
     else:
         # Uploaded bytes - let's check name if possible, otherwise try xlrd/openpyxl
         # We try to read it as excel
         try:
-            df = pd.read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='openpyxl', header=None)
+            df = _read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='openpyxl', header=None)
         except Exception:
             try:
                 # Seek back to 0
                 filepath_or_buffer.seek(0)
-                df = pd.read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='xlrd', header=None)
+                df = _read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='xlrd', header=None)
             except Exception:
                 filepath_or_buffer.seek(0)
-                df = pd.read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='pyxlsb', header=None)
+                df = _read_excel(filepath_or_buffer, sheet_name=sheet_name, engine='pyxlsb', header=None)
                 
     # Slice the data, skipping headers
     data = df.iloc[skip_rows:].copy()
@@ -1069,7 +1131,7 @@ def load_metadata(key, default=None):
     finally:
         conn.close()
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS, hash_funcs={io.BytesIO: _hash_upload_buffer})
+@cached_file_loader
 def load_paint_summary_by_vc(filepath_or_buffer):
     """
     Loads PPC Float Report Paint Summary and returns stage float counts aggregated by Short Vehicle Code (SHORT VC).
@@ -1096,16 +1158,16 @@ def load_paint_summary_by_vc(filepath_or_buffer):
             if isinstance(filepath_or_buffer, str):
                 ext = os.path.splitext(filepath_or_buffer.lower())[1]
                 if ext == '.xlsb':
-                    df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                    df = _read_excel(filepath_or_buffer, engine='pyxlsb')
                 else:
-                    df = pd.read_excel(filepath_or_buffer)
+                    df = _read_excel(filepath_or_buffer)
             else:
                 try:
-                    df = pd.read_excel(filepath_or_buffer, engine='pyxlsb')
+                    df = _read_excel(filepath_or_buffer, engine='pyxlsb')
                 except Exception:
                     try:
                         filepath_or_buffer.seek(0)
-                        df = pd.read_excel(filepath_or_buffer)
+                        df = _read_excel(filepath_or_buffer)
                     except Exception:
                         try:
                             filepath_or_buffer.seek(0)
@@ -1371,7 +1433,7 @@ def extract_trim_from_sales_desc(sales_desc, model_name=""):
     return d + fuel
 
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS, hash_funcs={io.BytesIO: _hash_upload_buffer})
+@cached_file_loader
 def load_all_models_catalog(filepath):
     """Loads All models.xlsx spreadsheet and returns VC mapping dicts for Sales Description and Trim."""
     vc_to_desc = {}
@@ -1382,7 +1444,7 @@ def load_all_models_catalog(filepath):
     try:
         xl = pd.ExcelFile(filepath)
         for sheet in xl.sheet_names:
-            df = pd.read_excel(filepath, sheet_name=sheet)
+            df = _read_excel(xl, sheet_name=sheet)
             desc_col = 'Sales Description' if 'Sales Description' in df.columns else None
             vc_col = 'Color VC' if 'Color VC' in df.columns else ('vc' if 'vc' in df.columns else ('SUB VC' if 'SUB VC' in df.columns else None))
             group_col = 'Group PL ' if 'Group PL ' in df.columns else ('PRODUCT' if 'PRODUCT' in df.columns else None)
@@ -1447,7 +1509,7 @@ def _reset_buffer(filepath_or_buffer):
             pass
 
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL_SECONDS, hash_funcs={io.BytesIO: _hash_upload_buffer})
+@cached_file_loader
 def load_shop_wise_report(filepath_or_buffer, return_debug=False):
     """
     Loads Shop Wise Production Summary Report (Shop_Wise_Report_*.xlsb, .xlsx, .xls, or HTML) and returns:
@@ -1492,7 +1554,7 @@ def load_shop_wise_report(filepath_or_buffer, return_debug=False):
             ext = _get_extension(filepath_or_buffer)
             if ext == '.xlsb':
                 try:
-                    df = pd.read_excel(filepath_or_buffer, sheet_name=0, engine='pyxlsb', header=None)
+                    df = _read_excel(filepath_or_buffer, sheet_name=0, engine='pyxlsb', header=None)
                     debug_info['engine_used'] = 'pyxlsb'
                 except Exception as e:
                     debug_info['attempts'].append({'stage': 'pyxlsb (.xlsb ext)', 'error': str(e)})
@@ -1501,19 +1563,19 @@ def load_shop_wise_report(filepath_or_buffer, return_debug=False):
         # 3. Standard pandas read_excel fallback chain
         if df is None:
             try:
-                df = pd.read_excel(filepath_or_buffer, sheet_name=0, header=None)
+                df = _read_excel(filepath_or_buffer, sheet_name=0, header=None)
                 debug_info['engine_used'] = 'read_excel'
             except Exception as e:
                 debug_info['attempts'].append({'stage': 'read_excel (auto engine)', 'error': str(e)})
                 _reset_buffer(filepath_or_buffer)
                 try:
-                    df = pd.read_excel(filepath_or_buffer, sheet_name=0, engine='pyxlsb', header=None)
+                    df = _read_excel(filepath_or_buffer, sheet_name=0, engine='pyxlsb', header=None)
                     debug_info['engine_used'] = 'pyxlsb'
                 except Exception as e:
                     debug_info['attempts'].append({'stage': 'pyxlsb (fallback)', 'error': str(e)})
                     _reset_buffer(filepath_or_buffer)
                     try:
-                        df = pd.read_excel(filepath_or_buffer, sheet_name=0, engine='xlrd', header=None)
+                        df = _read_excel(filepath_or_buffer, sheet_name=0, engine='xlrd', header=None)
                         debug_info['engine_used'] = 'xlrd'
                     except Exception as e:
                         debug_info['attempts'].append({'stage': 'xlrd', 'error': str(e)})
@@ -1675,7 +1737,7 @@ def download_from_onedrive(url):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
     
-    response = requests.get(download_url, headers=headers)
+    response = requests.get(download_url, headers=headers, timeout=(10, 45))
     response.raise_for_status()
     
     # Check if we got an HTML login page instead of the Excel file
@@ -1688,39 +1750,18 @@ def download_from_onedrive(url):
         
     return response.content
 
+@st.cache_data(show_spinner=False, max_entries=3, ttl=1800)
 def parse_onedrive_workbook(bytes_content):
-    """
-    Takes the raw bytes of the Dashboard files.xlsm, parses it, and returns 
-    a dictionary of BytesIO buffers for each of the 5 required reports.
-    """
-    excel_file = pd.ExcelFile(io.BytesIO(bytes_content), engine='openpyxl')
-    
-    # Mapping of system categories to their sheet names in the workbook
-    sheet_mapping = {
-        'FLOAT_REPORT': 'PPC_Float_BIW_VIN',
-        'FLOAT_PAINT_SUMMARY': 'PPC_Float_Paint',
-        'SHOP_WISE_REPORT': 'Date_Shop_Wise',
-        'TCF1_VGL': 'TCF1_VIN_Gen',
-        'TCF2_VGL': 'TCF2_VIN_Gen',
-        'HOURLY_PRODUCTION': 'Hourly_Production'
-    }
-    
-    buffers = {}
-    for key, sheet_name in sheet_mapping.items():
-        if sheet_name in excel_file.sheet_names:
-            df = pd.read_excel(excel_file, sheet_name=sheet_name)
-            
-            buf = io.BytesIO()
-            buf.name = f"{sheet_name}.xlsx"
-            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
-            buf.seek(0)
-            buffers[key] = buf
-        else:
-            buffers[key] = None
-            
-    return buffers
+    """Read each master sheet once; downstream loaders normalize DataFrames directly."""
+    mapping = {'FLOAT_REPORT':'PPC_Float_BIW_VIN', 'FLOAT_PAINT_SUMMARY':'PPC_Float_Paint',
+        'SHOP_WISE_REPORT':'Date_Shop_Wise', 'TCF1_VGL':'TCF1_VIN_Gen',
+        'TCF2_VGL':'TCF2_VIN_Gen', 'HOURLY_PRODUCTION':'Hourly_Production'}
+    digest = hashlib.sha256(bytes_content).hexdigest()
+    with pd.ExcelFile(io.BytesIO(bytes_content), engine='openpyxl') as workbook:
+        return {category: WorkbookSheet(pd.read_excel(workbook, sheet_name=sheet), sheet+'.xlsx', digest+':'+sheet)
+                if sheet in workbook.sheet_names else None for category, sheet in mapping.items()}
 
+@cached_file_loader
 def load_hourly_production(filepath_or_buffer):
     """
     Loads Hourly_Production report from Excel file, bytes buffer, or DataFrame.
@@ -1735,7 +1776,9 @@ def load_hourly_production(filepath_or_buffer):
         return None
         
     try:
-        if isinstance(filepath_or_buffer, pd.DataFrame):
+        if isinstance(filepath_or_buffer, WorkbookSheet):
+            df = filepath_or_buffer.frame.copy()
+        elif isinstance(filepath_or_buffer, pd.DataFrame):
             df = filepath_or_buffer.copy()
         elif hasattr(filepath_or_buffer, 'getvalue') or isinstance(filepath_or_buffer, (str, io.BytesIO)):
             if hasattr(filepath_or_buffer, 'seek'):
@@ -1750,7 +1793,7 @@ def load_hourly_production(filepath_or_buffer):
             if not sheet_target:
                 sheet_target = excel_file.sheet_names[0]
                 
-            df = pd.read_excel(excel_file, sheet_name=sheet_target)
+            df = _read_excel(excel_file, sheet_name=sheet_target)
         else:
             return None
             
@@ -1818,3 +1861,34 @@ def load_hourly_production(filepath_or_buffer):
         print(f"Error loading hourly production: {e}")
         return None
 
+
+
+
+def dispatch_scheduled_reports(now, token, chat_id, reports):
+    """Send each quarter-hour report once, retry failed reports during that minute.
+
+    Browser-driven scheduling is retained: an active dashboard session is required.
+    A crashed in-flight send is not blindly retried because Telegram has no idempotency key.
+    """
+    if now.minute not in (0, 15, 30, 45) or not token or not chat_id:
+        return
+    slot = now.strftime('%Y-%m-%d %H:%M')
+    with sqlite3.connect(DB_PATH, timeout=10) as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS telegram_deliveries (slot TEXT, chat TEXT, report INTEGER, status TEXT, PRIMARY KEY(slot,chat,report))')
+    results=[]
+    for index, message in enumerate(reports):
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT status FROM telegram_deliveries WHERE slot=? AND chat=? AND report=?', (slot,chat_id,index)).fetchone()
+            if row and row[0] in ('sending','sent'):
+                results.append(row[0] == 'sent')
+                continue
+            conn.execute('INSERT OR REPLACE INTO telegram_deliveries VALUES (?,?,?,?)', (slot,chat_id,index,'sending'))
+        ok, detail = send_telegram_message(token, chat_id, message)
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            conn.execute('UPDATE telegram_deliveries SET status=? WHERE slot=? AND chat=? AND report=?', ('sent' if ok else 'failed',slot,chat_id,index))
+        results.append(ok)
+    save_metadata('last_auto_tg_sent_time', now.strftime('%d-%m-%Y %I:%M %p'))
+    save_metadata('last_auto_tg_status', 'All 3 reports delivered' if all(results) else 'One or more reports pending or failed')
+    if all(results):
+        save_metadata('last_auto_tg_sent_slot',slot)
